@@ -1,0 +1,293 @@
+{
+  "project": "Bitburner Stock Trader System",
+  "session_date": "2026-02-24",
+  "session_window": "10:35 to 17:42",
+
+  "files": {
+    "stocktrader.js": {
+      "role": "baseline / original",
+      "lines": 451,
+      "status": "superseded",
+      "last_modified": "10:35",
+      "description": "Ghost of Wall Street — the v1 monolith. All logic in one file. No colour, no logging, no modes, no deploy cap, no cash reserve enforced.",
+      "features": [
+        "basic buy/sell with expected return ranking",
+        "forecast estimation from price history",
+        "inversion detection (inline)",
+        "4S fallback support",
+        "shorts (fail-open)",
+        "plain text dashboard with positions table",
+        "auto-buy market access (inline)"
+      ],
+      "missing": [
+        "cash reserve enforcement",
+        "max deployment cap",
+        "trade logging",
+        "ANSI colours",
+        "sparkline",
+        "profit rate projection",
+        "trading modes",
+        "shared libraries"
+      ]
+    },
+
+    "FinalStonkinton.js": {
+      "role": "primary trader",
+      "lines": 781,
+      "status": "active",
+      "last_modified": "17:42",
+      "description": "Full-featured multi-mode trader. The main rebuild. Imports from all 5 shared libs. Three modes: Normal, Turtle, YOLO.",
+      "modes": {
+        "normal": {
+          "forecastBuyLong": 0.575,
+          "forecastBuyShort": 0.425,
+          "buyThreshold4S": 0.0001,
+          "buyThresholdEst": 0.0015,
+          "maxPortfolioPct": 0.34,
+          "maxDeploy": 0.80
+        },
+        "turtle": {
+          "forecastBuyLong": 0.65,
+          "forecastBuyShort": 0.35,
+          "buyThreshold4S": 0.002,
+          "buyThresholdEst": 0.003,
+          "maxPortfolioPct": 0.20,
+          "note": "overridden by proven.txt if paper trader has graduated strategies"
+        },
+        "yolo": {
+          "betSize": "10% of net worth",
+          "maxActiveBets": 1,
+          "lossCooldownMs": 1440000,
+          "sellCondition": "forecast flips past 0.5"
+        }
+      },
+      "new_vs_v1": [
+        "shared library imports",
+        "cash reserve $1m enforced",
+        "80% max deployment cap",
+        "ANSI coloured dashboard",
+        "sparkline (120 tick history)",
+        "profit rate: /min /hr /24hr",
+        "session return percentage",
+        "inversion flag in position table",
+        "recent trade history (last 5)",
+        "top opportunities radar",
+        "trade logging to /strats/",
+        "JSONL session snapshots",
+        "turtle mode reads proven.txt",
+        "YOLO mode with loss cooldown",
+        "5 ANSI colour themes",
+        "estimation always runs (inversion warm)"
+      ]
+    },
+
+    "FinalStonkinton-paper.js": {
+      "role": "paper trading lab / strategy tester",
+      "lines": 442,
+      "status": "active",
+      "last_modified": "16:51",
+      "description": "Runs 6 strategies in parallel with virtual portfolios. No real trades. Graduates winners to /strats/proven.txt for turtle mode to consume.",
+      "strategies": [
+        { "name": "Aggressive",   "forecastBuyLong": 0.55, "maxPct": 0.40, "shortWindow": 10 },
+        { "name": "Moderate",     "forecastBuyLong": 0.575,"maxPct": 0.34, "shortWindow": 10 },
+        { "name": "Conservative", "forecastBuyLong": 0.60, "maxPct": 0.25, "shortWindow": 10 },
+        { "name": "Turtle",       "forecastBuyLong": 0.65, "maxPct": 0.20, "shortWindow": 10 },
+        { "name": "Sniper",       "forecastBuyLong": 0.70, "maxPct": 0.15, "shortWindow": 10 },
+        { "name": "Momentum",     "forecastBuyLong": 0.55, "maxPct": 0.34, "shortWindow": 5  }
+      ],
+      "graduation_criteria": {
+        "min_ticks": 200,
+        "min_win_rate": 0.55,
+        "min_pnl": 0
+      },
+      "output_file": "/strats/proven.txt",
+      "metrics_tracked": ["pnl", "win_rate", "trade_count", "max_drawdown", "sharpe_ratio"]
+    },
+
+    "FinalStonkintonSIMPLE.js": {
+      "role": "simplified variant",
+      "lines": 357,
+      "status": "active",
+      "last_modified": "17:20",
+      "description": "Turtle-only trader, lean and readable. Same shared libs, no modes, no paper trader integration, no YOLO.",
+      "config": {
+        "forecastBuyLong": 0.65,
+        "forecastBuyShort": 0.35,
+        "forecastSellLong": 0.52,
+        "forecastSellShort": 0.48,
+        "minER": 0.002,
+        "maxPerStock": 0.20,
+        "maxDeploy": 0.80,
+        "reserveCash": 1000000
+      }
+    },
+
+    "bleedingedgestocktrader.js": {
+      "role": "experimental adaptive trader",
+      "lines": 494,
+      "status": "experimental",
+      "last_modified": "17:22",
+      "description": "Self-optimizing trader. Three features not in other scripts: adaptive parameter tuning, momentum scoring, 4S+estimate blending.",
+      "unique_features": {
+        "adaptive_engine": {
+          "trigger": "every 50 ticks, minimum 5 trades",
+          "win_rate_high": "> 0.65 — loosen thresholds, grow max position",
+          "win_rate_low":  "< 0.45 — tighten thresholds, shrink max position",
+          "param_bounds": {
+            "forecastBuyLong":  { "min": 0.55, "max": 0.70 },
+            "forecastBuyShort": { "min": 0.30, "max": 0.45 },
+            "maxPerStock":      { "min": 0.15, "max": 0.35 },
+            "buyThreshold":     { "min": 0.0005, "max": 0.003 }
+          }
+        },
+        "momentum_scoring": {
+          "window": "last 5 ticks",
+          "weights": [1.0, 1.5, 2.0, 2.5, 3.0],
+          "range": "-1.0 to +1.0",
+          "buy_effect": "momentum agreeing with forecast boosts rank by up to 1.5x",
+          "sell_trigger": "abs(momentum) > 0.3 and direction opposes position"
+        },
+        "blended_forecast": {
+          "agree": "0.70 * 4S + 0.30 * estimate",
+          "disagree": "0.85 * 4S + 0.15 * 0.5",
+          "rationale": "estimate may detect cycle flips 1-2 ticks before 4S updates"
+        }
+      }
+    }
+  },
+
+  "shared_libraries": {
+    "lib/themes.js": {
+      "exports": ["getTheme", "makeColors"],
+      "themes": ["classic", "neon", "matrix", "ocean", "fire"],
+      "implementation": "ANSI SGR escape codes, pre-built prefix strings to avoid hot-path allocation"
+    },
+    "lib/market.js": {
+      "exports": ["tryBuyAccess", "checkAccess", "waitForTIX"],
+      "cost_tiers": {
+        "WSE": "200m",
+        "TIX": "5b",
+        "4S data": "1b",
+        "4S TIX API": "25b"
+      }
+    },
+    "lib/estimate.js": {
+      "exports": ["estimateForecast", "estimateVolatility", "calcMomentum"],
+      "estimateForecast": {
+        "algorithm": "count up-ticks over long and short windows in a single pass",
+        "long_window_default": 76,
+        "short_window_default": 10,
+        "inversion_delta_default": 0.15,
+        "convergence_time_ticks": "20-30 after a cycle flip"
+      },
+      "estimateVolatility": {
+        "algorithm": "mean absolute percentage change over last 20 ticks"
+      },
+      "calcMomentum": {
+        "algorithm": "weighted sum over last 5 ticks, normalized to [-1, 1]",
+        "note": "only used by bleedingedge"
+      }
+    },
+    "lib/portfolio.js": {
+      "exports": ["totalWorth", "sparkline"],
+      "totalWorth_note": "uses getSaleGain (bid/ask-adjusted) not price*shares",
+      "sparkline_note": "uses manual min/max loop — Math.min(...data) throws RangeError on large arrays"
+    },
+    "lib/logging.js": {
+      "exports": ["logTrade", "logSnapshot"],
+      "format_trade": "[T{tick}] {L|S} {SYM} P/L:{amount}{extra}",
+      "format_snapshot": "JSONL — one JSON object per line, append-only"
+    }
+  },
+
+  "interesting_problems_solved": [
+    {
+      "problem": "Market cycle detection without 4S data",
+      "solution": "Two-window up-tick count. Long window shows historical trend; short window shows recent. When they disagree (opposite sides of 0.5) by more than inversionDelta, a flip is likely in progress.",
+      "why_interesting": "Simple counting algorithm that surfaces a hidden game mechanic. Convergence is slow (~20-30 ticks) but the inversion flag gives protection during that window."
+    },
+    {
+      "problem": "Estimation needs to stay warm even with 4S",
+      "solution": "Run estimateForecast every tick regardless of has4S. The inversion detector needs continuous price history to compare windows. If estimation only runs as a 4S fallback, the short window goes cold and flips get missed.",
+      "why_interesting": "A subtle dependency: the inversion detector is a byproduct of estimation, not a separate system. It stops working if estimation stops running."
+    },
+    {
+      "problem": "Commission math causing silent buy failures",
+      "solution": "Subtract commission before calculating shares: shares = floor((budget - 100k) / price). Then verify getPurchaseCost fits in remaining budget. The bid/ask spread means getPurchaseCost > shares*price.",
+      "why_interesting": "Easy to get wrong. Off-by-one on commission causes the buy to exceed budget, which Bitburner silently ignores (0 shares bought, money not spent)."
+    },
+    {
+      "problem": "Sparkline crashing on large arrays",
+      "solution": "Manual min/max loop instead of Math.min(...data). Spread syntax hits JS engine argument limit (~65k items) and throws RangeError.",
+      "why_interesting": "Counter-intuitive: the idiomatic JS approach breaks on arrays this size. The fix is just a loop."
+    },
+    {
+      "problem": "YOLO tilt-trading",
+      "solution": "24-minute cooldown (Date.now() + 24*60*1000) stored in state after any losing bet. New bets blocked until cooldown expires.",
+      "why_interesting": "Models a real behavioral finance concept. The cooldown doesn't improve EV mathematically but prevents compounding losses from rapid re-entry."
+    },
+    {
+      "problem": "Paper trader → real trader feedback loop",
+      "solution": "Paper trader writes proven strategies to /strats/proven.txt. Real trader reads it on startup (turtle mode). Best-performing virtual strategy's parameters replace hardcoded defaults.",
+      "why_interesting": "A clean self-improvement loop contained entirely within Bitburner's filesystem. No external services needed."
+    }
+  ],
+
+  "things_to_improve": [
+    {
+      "area": "Estimation convergence speed",
+      "issue": "After a cycle flip, the long-window estimate takes 20-30 ticks to reflect the new reality. During this window the inversion flag is the only protection.",
+      "suggestion": "Weighted recency — recent ticks count more than old ones in the up-tick count. Could halve convergence time. Exponential moving average style weighting rather than flat count."
+    },
+    {
+      "area": "Paper trader P/L accuracy",
+      "issue": "Virtual sells use getBidPrice directly. Real trades use getSaleGain which accounts for bid/ask spread and commission correctly. Paper results are slightly optimistic.",
+      "suggestion": "Implement a virtual getSaleGain equivalent that deducts the spread. Or compensate by raising the graduation win rate requirement by a few percent."
+    },
+    {
+      "area": "Cross-aug persistence",
+      "issue": "All log files and proven.txt are wiped on augmentation install. The graduation feedback loop resets from zero every aug cycle.",
+      "suggestion": "Inside Bitburner there's no fix. Best mitigation: export a summary to clipboard before installing augs. Could write a separate script that formats proven.txt for clipboard copy."
+    },
+    {
+      "area": "bleedingedge adaptive engine — unvalidated bounds",
+      "issue": "Adaptation step sizes (±0.01 forecast, ±0.02 maxPerStock) and tick minimums (50 ticks between adjustments) were chosen by intuition, not tested.",
+      "suggestion": "Run the paper trader with the adaptive logic applied to virtual portfolios to see if it actually helps. Compare adaptive vs fixed-threshold P/L over 500+ ticks."
+    },
+    {
+      "area": "Position age tracking",
+      "issue": "ticksSinceAction tracks time since last buy/sell, not how long the current position has been open. No way to exit stale positions.",
+      "suggestion": "Add positionOpenTick field on each stock object. Set it when shares are first bought, clear it on sell. Use it to force-exit positions older than N ticks even if signal is neutral."
+    },
+    {
+      "area": "SIMPLE and FinalStonkinton buy/sell logic divergence",
+      "issue": "Both scripts have their own buy phase and sell phase implementations. A logic fix in one won't automatically apply to the other.",
+      "suggestion": "Either keep them manually in sync, or extract buyPhase/sellPhase into lib/trader.js as configurable functions and have both scripts call the same code."
+    },
+    {
+      "area": "No short-circuit when market is flat",
+      "issue": "Both normal and SIMPLE traders run full buy/sell evaluation every tick even when nothing meaningful is happening (low volatility, no signals).",
+      "suggestion": "Track average ER magnitude across all stocks. If max ER is below a noise floor for N consecutive ticks, skip buy phase entirely and sleep until next update. Reduces unnecessary API calls."
+    }
+  ],
+
+  "metrics": {
+    "total_scripts": 5,
+    "total_lib_files": 5,
+    "total_lines_of_code": {
+      "stocktrader.js": 451,
+      "FinalStonkinton.js": 781,
+      "FinalStonkinton-paper.js": 442,
+      "FinalStonkintonSIMPLE.js": 357,
+      "bleedingedgestocktrader.js": 494,
+      "lib/themes.js": 99,
+      "lib/market.js": 91,
+      "lib/estimate.js": 149,
+      "lib/portfolio.js": 93,
+      "lib/logging.js": 58,
+      "total": 3015
+    },
+    "refactored_from_monolith": true,
+    "shared_lib_coverage": "themes, market access, estimation, portfolio math, logging all shared across scripts"
+  }
+}

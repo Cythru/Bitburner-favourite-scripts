@@ -1,0 +1,18 @@
+# Bitburner game engine files
+bitburner.exe
+*.dll
+*.pak
+*.bin
+*.vkd
+*.dat
+icudtl.dat
+snapshot_blob.bin
+v8_context_snapshot.bin
+vk_swiftshader_icd.json
+steam_appid.txt
+version
+LICENSES.chromium.html
+
+# Game asset directories
+locales/
+resources/

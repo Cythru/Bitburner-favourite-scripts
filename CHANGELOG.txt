@@ -1,0 +1,46 @@
+FINAL STONKINTON - Patch Notes
+================================
+
+v2.0.0 - The Big Refactor
+--------------------------
+Renamed from "stocktrader.js" to FinalStonkinton family.
+
+NEW FILES:
+  FinalStonkinton.js        - Full-featured trader (Normal/Turtle/YOLO/Liquidate)
+  FinalStonkintonSIMPLE.js  - Clean turtle-only trader, no noise
+  FinalStonkinton-paper.js  - Paper trading lab (simulates 6 strategies)
+
+MODES (FinalStonkinton.js):
+  run FinalStonkinton.js              Normal mode - same logic as original
+  run FinalStonkinton.js --turtle     TURTLE UP - conservative, high-confidence only
+  run FinalStonkinton.js --yolo       GO BIG OR GO HOME - 10% bets, 24min cooldown on loss
+  run FinalStonkinton.js --liquidate  Emergency sell all positions
+
+SIMPLE VERSION (FinalStonkintonSIMPLE.js):
+  run FinalStonkintonSIMPLE.js              Turtle mode only, requires 4S data
+  run FinalStonkintonSIMPLE.js --liquidate  Emergency sell all
+
+PAPER TRADING LAB (FinalStonkinton-paper.js):
+  run FinalStonkinton-paper.js    Runs 6 virtual portfolios on live data, zero real trades
+                                  Graduates winning strategies to /strats/proven.txt
+
+CHANGES FROM ORIGINAL:
+  [+] ANSI color output - green/red P/L, colored forecasts and mode indicators
+  [+] Return % column on positions - see per-stock performance at a glance
+  [+] Net worth sparkline graph - visual trend over time
+  [+] TURTLE UP mode - forecastBuyLong=0.65, maxPct=0.20, wider sell margins
+  [+] Proven strategy loading - turtle mode reads /strats/proven.txt from paper trader
+  [+] YOLO mode - one 10% bet at a time, 24min cooldown on loss, win/loss scoreboard
+  [+] Reserve cash - always keeps $1m on hand
+  [+] 80% max deployment - never invests more than 80% of total worth
+  [+] SIMPLE version - stripped down turtle-only, no inversion detection, pure 4S signal
+
+TRADING LOGIC (unchanged in Normal mode):
+  - Same buy/sell thresholds as original stocktrader.js
+  - Same forecast estimation for pre-4S
+  - Same inversion detection
+  - Same portfolio concentration limits
+  - Same commission handling ($100k per trade)
+
+OLD FILES (can be removed):
+  stocktrader.js  - Original, superseded by FinalStonkinton.js

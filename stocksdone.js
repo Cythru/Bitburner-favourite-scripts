@@ -1,4 +1,13 @@
-// Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--theme classic|neon|matrix|ocean|fire]
+// Usage: run stocksdone.js [--turtle] [--yolo] [--momentum] [--sniper] [--spray] [--kelly] [--liquidate] [--theme classic|neon|matrix|ocean|fire]
+//
+// Modes:
+//   (default) Normal  — balanced thresholds, diversified positions
+//   --turtle          — conservative, loads paper-trader proven params (or hardcoded safe defaults)
+//   --yolo            — single 10% bet at a time, 24-min loss cooldown
+//   --momentum        — confirmation entry: only buys when forecast is accelerating in trade direction
+//   --sniper          — ultra-high conviction, max 3 positions, 45% per-stock cap, requires 4S+est agreement
+//   --spray           — wide diversification, up to 10 positions, accepts weaker signals
+//   --kelly           — Kelly criterion sizing: allocates capital proportional to edge/volatility ratio
 //
 // Shared libraries loaded dynamically with fallbacks (see /lib/ for full docs):
 //   themes.js   — color palettes and ANSI helpers
@@ -44,24 +53,25 @@ async function _loadLibs(ns) {
 /** @param {NS} ns */
 export async function main(ns) {
   // ╔══════════════════════════════════════════════════════════════╗
-  // ║  FinalStonkinton - Multi-Mode Stock Trader                  ║
+  // ║  stocksdone — Multi-Mode Stock Trader                       ║
   // ║                                                             ║
-  // ║  3 trading modes in one script:                             ║
-  // ║    Normal  — balanced thresholds, buys many stocks          ║
-  // ║    Turtle  — conservative, high-confidence trades only      ║
-  // ║    YOLO    — single 10% bet at a time, 24min loss cooldown  ║
+  // ║  7 trading modes in one script:                             ║
+  // ║    Normal   — balanced thresholds, buys many stocks         ║
+  // ║    Turtle   — conservative, high-confidence trades only     ║
+  // ║    YOLO     — single 10% bet at a time, 24min loss cooldown ║
+  // ║    Momentum — only buys while forecast is accelerating      ║
+  // ║    Sniper   — ultra-high conviction, 3 positions max        ║
+  // ║    Spray    — wide diversification, 10 positions            ║
+  // ║    Kelly    — mathematically optimal position sizing        ║
   // ║                                                             ║
   // ║  Works with or without 4S data (estimates from prices).     ║
   // ║  Always keeps $1m cash reserve for safety.                  ║
   // ║  Auto-buys market access tiers as you earn more money.      ║
   // ╚══════════════════════════════════════════════════════════════╝
 
-  // Suppress built-in Bitburner log spam (sleep, stock API calls, etc.)
   ns.disableLog("ALL");
-  // Open a tail window so the dashboard is visible
   ns.tail();
 
-  // Load shared libs — falls back to built-in implementations if /lib/ files are missing
   const { getTheme, makeColors, tryBuyAccess, checkAccess, waitForTIX,
           estimateForecast, estimateVolatility, totalWorth, sparkline,
           logTrade, logSnapshot } = await _loadLibs(ns);
@@ -69,98 +79,93 @@ export async function main(ns) {
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 1: MODE FLAGS + THEME
-  // Parse command-line arguments to determine which mode to run.
-  // Only one mode should be active at a time.
   // ═══════════════════════════════════════════════════════════════
 
   const TURTLE    = ns.args.includes("--turtle");    // conservative mode
-  const YOLO      = ns.args.includes("--yolo");       // single-bet gambling mode
-  const LIQUIDATE = ns.args.includes("--liquidate");   // emergency sell-all
+  const YOLO      = ns.args.includes("--yolo");      // single-bet gambling mode
+  const MOMENTUM  = ns.args.includes("--momentum");  // forecast-acceleration confirmation entry
+  const SNIPER    = ns.args.includes("--sniper");    // ultra-high conviction, 3 positions max
+  const SPRAY     = ns.args.includes("--spray");     // diversified spray across 10 stocks
+  const KELLY     = ns.args.includes("--kelly");     // Kelly criterion position sizing
+  const LIQUIDATE = ns.args.includes("--liquidate"); // emergency sell-all
 
-  // getTheme reads --theme from ns.args, returns { theme, name }
-  // makeColors builds an ANSI color helper object from the theme
   const { theme, name: THEME } = getTheme(ns);
   const C = makeColors(theme);
 
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 2: CONFIGURATION
-  // These are the "knobs" that control trading behavior.
-  // Normal mode uses these defaults directly.
-  // Turtle mode overrides them in Section 3 below.
   // ═══════════════════════════════════════════════════════════════
 
   const CONFIG = {
     // ── Risk management ──
-    reserveCash:      1_000_000,  // always keep $1m liquid — never invest last dollar
-    maxDeploy:        0.80,       // never invest more than 80% of total worth
-    maxPortfolioPct:  0.34,       // max 34% of worth in any single stock (diversification)
-    commission:       100_000,    // Bitburner charges $100k per buy/sell transaction
+    reserveCash:      1_000_000,
+    maxDeploy:        0.80,
+    maxPortfolioPct:  0.34,
+    commission:       100_000,
 
     // ── Buy thresholds ──
-    // These control how strong a signal must be before we enter a position.
-    // "forecast" = probability the stock goes up next tick (0.5 = coin flip)
-    forecastBuyLong:  0.575,      // buy long when forecast > 57.5% (slight edge)
-    forecastBuyShort: 0.425,      // buy short when forecast < 42.5%
-    buyThreshold4S:   0.0001,     // min expected return with 4S data (very sensitive)
-    buyThresholdEst:  0.0015,     // min expected return with estimates (need more edge)
+    forecastBuyLong:  0.575,
+    forecastBuyShort: 0.425,
+    buyThreshold4S:   0.0001,
+    buyThresholdEst:  0.0015,
 
     // ── Sell thresholds ──
-    // When to exit positions. Lower than buy thresholds = hysteresis
-    // (prevents buy→sell→buy oscillation on marginal signals)
-    forecastSellLong:  0.5,       // exit long when forecast drops to coin-flip
-    forecastSellShort: 0.5,       // exit short when forecast rises to coin-flip
-    sellThreshold4S:   0,         // any negative ER = exit (with 4S data)
-    sellThresholdEst:  0.0005,    // small buffer for estimate noise
+    forecastSellLong:  0.5,
+    forecastSellShort: 0.5,
+    sellThreshold4S:   0,
+    sellThresholdEst:  0.0005,
 
-    // ── Estimation engine parameters ──
-    // Used by /lib/estimate.js to build forecasts from price history
-    tickHistoryLen:   80,         // how many ticks of prices to remember per stock
-    longWindow:       76,         // ticks for main forecast (should be close to cycle length)
-    shortWindow:      10,         // ticks for recent-trend / cycle-flip detection
-    inversionDelta:   0.15,       // how much long/short windows must disagree to flag a flip
+    // ── Estimation engine ──
+    tickHistoryLen:   80,
+    longWindow:       76,
+    shortWindow:      10,
+    inversionDelta:   0.15,
 
-    autoBuyAccess:    true,       // auto-purchase WSE/TIX/4S when affordable
+    autoBuyAccess:    true,
 
     // ── Stale position exit ──
-    // Force-exit positions held for a full market cycle with no meaningful signal.
-    // Prevents capital from being stuck in slow-moving stocks.
-    staleExitTicks:   75,         // one full cycle length; exit if held this long
-    staleNeutralBand: 0.02,       // "neutral" = forecast within 0.02 of 0.5
+    staleExitTicks:   75,
+    staleNeutralBand: 0.02,
 
     // ── Flat market short-circuit ──
-    // Skip the buy phase when no stock has a meaningful expected return.
-    // Reduces unnecessary API calls during quiet market periods.
-    flatBuySkipFloor: 0.0003,     // max |ER| below which market is considered flat
-    flatBuySkipTicks: 3,          // consecutive flat ticks required before skipping
+    flatBuySkipFloor: 0.0003,
+    flatBuySkipTicks: 3,
+
+    // ── Momentum mode ──
+    // momentumScore = (forecast_now - forecast_N_ticks_ago) / N
+    // Positive = bullish acceleration, negative = bearish acceleration
+    momentumWindow:   3,          // ticks over which to measure forecast acceleration
+    momentumMinScore: 0.003,      // min forecast change per tick to confirm entry signal
+
+    // ── Sniper mode ──
+    sniperMaxPositions: 3,        // max concurrent positions
+    sniperFcstConfirm:  true,     // require 4S and estimated forecast to agree on direction
+
+    // ── Spray mode ──
+    sprayMaxPositions: 10,        // max concurrent positions
   };
 
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 3: TURTLE MODE OVERRIDES
-  // In turtle mode, we either load battle-tested parameters from
-  // the paper trader (FinalStonkinton-paper.js saves winners to
-  // /strats/proven.txt) or fall back to hardcoded conservative values.
   // ═══════════════════════════════════════════════════════════════
 
-  let provenParams = null;  // stores loaded paper-trader strategy (if any)
+  let provenParams = null;
 
   if (TURTLE) {
-    // Try loading the best strategy from paper trader results
     try {
       const raw = ns.read("/strats/proven.txt");
       if (raw && raw.length > 2) {
         const strats = JSON.parse(raw);
         if (strats.length > 0) {
-          // Sort by profit — use the most profitable proven strategy
           strats.sort((x, y) => y.score.pnl - x.score.pnl);
           provenParams = strats[0];
         }
       }
-    } catch { /* file doesn't exist yet — paper trader hasn't run */ }
+    } catch { /* file doesn't exist yet */ }
 
     if (provenParams && provenParams.score.pnl > 0) {
-      // Paper-trader-proven parameters — these actually made money in testing
       const p = provenParams.params;
       CONFIG.forecastBuyLong  = p.forecastBuyLong;
       CONFIG.forecastBuyShort = p.forecastBuyShort;
@@ -170,202 +175,220 @@ export async function main(ns) {
       CONFIG.buyThresholdEst  = p.buyThreshold;
       CONFIG.maxPortfolioPct  = p.maxPortfolioPct;
     } else {
-      // No proven strats available — use hardcoded conservative defaults
-      // These are tighter than normal mode (higher confidence required)
-      CONFIG.forecastBuyLong  = 0.65;      // need 65% forecast to buy (vs 57.5% normal)
-      CONFIG.forecastBuyShort = 0.35;      // need 35% forecast to short (vs 42.5% normal)
-      CONFIG.forecastSellLong = 0.52;      // exit earlier than normal (vs 0.5)
-      CONFIG.forecastSellShort = 0.48;     // exit earlier than normal (vs 0.5)
-      CONFIG.buyThreshold4S   = 0.002;     // need 20x more edge than normal mode
-      CONFIG.buyThresholdEst  = 0.003;     // need 2x more edge than normal mode
-      CONFIG.maxPortfolioPct  = 0.20;      // max 20% per stock (vs 34% normal)
+      CONFIG.forecastBuyLong  = 0.65;
+      CONFIG.forecastBuyShort = 0.35;
+      CONFIG.forecastSellLong = 0.52;
+      CONFIG.forecastSellShort = 0.48;
+      CONFIG.buyThreshold4S   = 0.002;
+      CONFIG.buyThresholdEst  = 0.003;
+      CONFIG.maxPortfolioPct  = 0.20;
     }
   }
 
 
   // ═══════════════════════════════════════════════════════════════
-  // SECTION 4: STATE
-  // Mutable state that tracks the current session.
-  // Everything here resets when the script restarts.
+  // SECTION 3B: NEW MODE CONFIG OVERRIDES
+  // Each new mode shares the same data infrastructure as Normal mode
+  // but uses different entry/exit thresholds and position sizing.
   // ═══════════════════════════════════════════════════════════════
 
-  const stocks         = {};     // sym → per-stock tracking object (initialized in Section 6)
-  let   has4S          = false;  // do we have 4S TIX API? (best data source)
-  let   hasTIX         = false;  // do we have TIX API at all? (required to trade)
-  let   hasShorts      = true;   // can we short? (fails gracefully if SF not unlocked)
-  let   tickCount      = 0;      // how many market ticks since script started
-  let   totalProfit    = 0;      // cumulative realized P/L this session
-  let   totalTradeCount = 0;     // number of completed trades this session
-  let   flatTicks      = 0;      // consecutive ticks with no meaningful market signal
-  const sessionStart   = Date.now();  // for calculating elapsed time and $/min
-  const worthHistory   = [];     // net worth samples for the sparkline graph (last 120)
-  const recentTrades   = [];     // last 5 closed trades for dashboard display
+  if (MOMENTUM) {
+    // Tighter entry thresholds — only buy when forecast is accelerating.
+    // The momentumBuyPhase adds an additional filter: momentumScore must
+    // exceed momentumMinScore in the trade direction before entry.
+    CONFIG.forecastBuyLong   = 0.60;  // need 60% conviction (vs 57.5% normal)
+    CONFIG.forecastBuyShort  = 0.40;
+    CONFIG.forecastSellLong  = 0.52;  // exit early to protect gains
+    CONFIG.forecastSellShort = 0.48;
+    CONFIG.maxPortfolioPct   = 0.28;  // 28% per stock (vs 34% normal)
+  }
 
-  // YOLO mode state — tracks the current single bet and win/loss record
+  if (SNIPER) {
+    // Extreme thresholds — very few trades, very heavy position sizing.
+    // sniperBuy() only enters the single BEST opportunity per tick,
+    // and requires BOTH 4S and estimated forecast to agree on direction.
+    CONFIG.forecastBuyLong   = 0.70;  // need 70% conviction
+    CONFIG.forecastBuyShort  = 0.30;
+    CONFIG.forecastSellLong  = 0.52;  // exit earlier to protect large bets
+    CONFIG.forecastSellShort = 0.48;
+    CONFIG.buyThreshold4S    = 0.004; // 40x higher threshold than Normal
+    CONFIG.buyThresholdEst   = 0.006; // 4x higher than Normal
+    CONFIG.maxPortfolioPct   = 0.45;  // concentrate 45% in a single sniper shot
+  }
+
+  if (SPRAY) {
+    // Low thresholds — accept many weak signals, rely on diversification.
+    // Warning: commission costs ($100k/trade) eat small positions.
+    // Spray works best with a large bankroll (>$500m).
+    CONFIG.forecastBuyLong   = 0.55;  // accept slightly-bullish signals
+    CONFIG.forecastBuyShort  = 0.45;
+    CONFIG.forecastSellLong  = 0.502; // exit almost immediately on reversal
+    CONFIG.forecastSellShort = 0.498;
+    CONFIG.buyThreshold4S    = 0.00005; // accept very weak 4S signals
+    CONFIG.buyThresholdEst   = 0.0008;
+    CONFIG.maxPortfolioPct   = 0.12;  // 12% per stock — 10 stocks = 120% cap (unreachable)
+  }
+
+  // KELLY: uses Normal thresholds — only position sizing differs.
+  // kellyBuyPhase() calculates kelly fraction = |ER| / volatility
+  // and allocates budget proportionally rather than equally.
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 4: STATE
+  // ═══════════════════════════════════════════════════════════════
+
+  const stocks         = {};
+  let   has4S          = false;
+  let   hasTIX         = false;
+  let   hasShorts      = true;
+  let   tickCount      = 0;
+  let   totalProfit    = 0;
+  let   totalTradeCount = 0;
+  let   flatTicks      = 0;
+  const sessionStart   = Date.now();
+  const worthHistory   = [];
+  const recentTrades   = [];
+
   const yolo = {
-    cooldownUntil: 0,            // timestamp — no new bets until this passes (24min after loss)
-    wins:      0,                // total winning bets
-    losses:    0,                // total losing bets
-    totalWon:  0,                // total $ won across all winning bets
-    totalLost: 0,                // total $ lost across all losing bets
-    activeBet: null,             // current bet: { sym, type, shares, entryPrice, tick }
-    history:   [],               // last 20 bet results (P/L amounts) for W/L streak display
+    cooldownUntil: 0,
+    wins:      0,
+    losses:    0,
+    totalWon:  0,
+    totalLost: 0,
+    activeBet: null,
+    history:   [],
   };
 
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 5: EMERGENCY LIQUIDATE
-  // When run with --liquidate, sells ALL positions immediately
-  // and exits. Use this to cash out before installing augmentations
-  // or if the market is tanking and you want out NOW.
   // ═══════════════════════════════════════════════════════════════
 
   if (LIQUIDATE) {
     try { hasTIX = ns.stock.hasTIXAPIAccess(); } catch { /* */ }
     for (const sym of ns.stock.getSymbols()) {
       const [ls, , ss] = ns.stock.getPosition(sym);
-      if (ls > 0) ns.stock.sellStock(sym, ls);     // sell all long shares
-      if (ss > 0) try { ns.stock.sellShort(sym, ss); } catch { /* shorts unavailable */ }
+      if (ls > 0) ns.stock.sellStock(sym, ls);
+      if (ss > 0) try { ns.stock.sellShort(sym, ss); } catch { /* */ }
     }
     ns.tprint("All positions liquidated.");
-    return;  // exit script immediately
+    return;
   }
 
 
   // ═══════════════════════════════════════════════════════════════
-  // SECTION 6: MARKET ACCESS
-  // Ensures we have TIX API before trading. Auto-buys upgrades.
-  // Then initializes per-stock tracking objects for all symbols.
+  // SECTION 6: MARKET ACCESS + STOCK INIT
   // ═══════════════════════════════════════════════════════════════
 
-  // Try to buy any missing access tiers, then check what we have
   if (CONFIG.autoBuyAccess) tryBuyAccess(ns);
   ({ hasTIX, has4S } = checkAccess(ns));
 
-  // If we don't have TIX API yet, block and wait (retries every 30s)
   if (!hasTIX) {
     ({ hasTIX, has4S } = await waitForTIX(ns));
   }
 
-  // Build the per-stock tracking objects
-  // Each stock gets: price history, forecast data, position data, etc.
   const symbols = ns.stock.getSymbols();
   for (const sym of symbols) {
     stocks[sym] = {
       sym,
-      priceHistory:    [],       // rolling window of prices (last tickHistoryLen ticks)
-      forecast:        0.5,      // 4S forecast (0-1, >0.5 = bullish) — only valid when has4S
-      volatility:      0.01,     // 4S volatility — only valid when has4S
-      estForecast:     0.5,      // our estimated forecast from price history
-      estForecastShort: 0.5,     // short-window forecast for cycle-flip detection
-      longShares:      0,        // current long position size (synced from game each tick)
-      longAvgPrice:    0,        // average buy price for long position
-      shortShares:     0,        // current short position size
-      shortAvgPrice:   0,        // average entry price for short position
-      maxShares:       ns.stock.getMaxShares(sym),  // Bitburner caps shares per stock
-      ticksSinceAction: 999,     // cooldown tracker — avoid rapid re-entry
-      positionOpenTick: 0,       // tick when position was first opened (0 = flat)
-      inversionFlag:   false,    // true when market cycle flip detected
+      priceHistory:    [],
+      forecast:        0.5,
+      volatility:      0.01,
+      estForecast:     0.5,
+      estForecastShort: 0.5,
+      longShares:      0,
+      longAvgPrice:    0,
+      shortShares:     0,
+      shortAvgPrice:   0,
+      maxShares:       ns.stock.getMaxShares(sym),
+      ticksSinceAction: 999,
+      positionOpenTick: 0,
+      inversionFlag:   false,
+      forecastHistory: [],   // rolling window of forecasts — used by momentumScore()
     };
   }
 
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 7: DATA ENGINE
-  // Bridges the gap between raw price data and trading decisions.
-  // runEstimation() feeds price history through /lib/estimate.js
-  // to compute forecast + inversion flags.
-  // expectedReturn() is THE core metric: ER = volatility * (forecast - 0.5)
-  // Positive ER = stock expected to go up, negative = expected to go down.
   // ═══════════════════════════════════════════════════════════════
 
-  // Run the estimation library on a stock's price history
-  // and store results back on the stock object.
-  // Called every tick for every stock, even with 4S data,
-  // because the inversion detector needs continuous data.
   function runEstimation(stock) {
     const est = estimateForecast(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta);
-    stock.estForecast      = est.forecast;       // probability stock goes up (estimated)
-    stock.estForecastShort = est.forecastShort;   // same but short window
-    stock.inversionFlag    = est.inversionFlag;   // true = market cycle flip detected
+    stock.estForecast      = est.forecast;
+    stock.estForecastShort = est.forecastShort;
+    stock.inversionFlag    = est.inversionFlag;
   }
 
-  // THE key trading metric. Positive ER = expected profit, negative = expected loss.
-  // With 4S: uses the game's exact forecast and volatility numbers.
-  // Without 4S: uses our estimated forecast + estimated volatility.
-  // Formula: ER = volatility * (forecast - 0.5)
-  //   If forecast = 0.6 and volatility = 0.02:
-  //   ER = 0.02 * 0.1 = 0.002 = 0.2% expected gain per tick
+  // Core metric. Positive ER = expected profit per tick, negative = expected loss.
+  // ER = volatility * (forecast - 0.5)
   function expectedReturn(stock) {
     const f = has4S ? stock.forecast : stock.estForecast;
     const v = has4S ? stock.volatility : estimateVolatility(stock.priceHistory);
     return v * (f - 0.5);
   }
 
+  // Momentum score: average forecast change per tick over the last N ticks.
+  // Positive = forecast trending bullish (rising), negative = trending bearish (falling).
+  // Returns 0 if there is insufficient history to measure.
+  function momentumScore(stock) {
+    const h = stock.forecastHistory;
+    const w = CONFIG.momentumWindow;
+    if (h.length < w + 1) return 0;
+    return (h[h.length - 1] - h[h.length - 1 - w]) / w;
+  }
+
+  // Kelly fraction for a stock: measures edge relative to risk.
+  // Higher kelly = better bang-per-buck. Used for proportional budget allocation.
+  // Formula: |ER| / volatility  (simplified Kelly for binary-like market outcomes)
+  function kellyFraction(stock) {
+    const er  = expectedReturn(stock);
+    const vol = has4S ? stock.volatility : estimateVolatility(stock.priceHistory);
+    return vol > 0.001 ? Math.abs(er) / vol : 0;
+  }
+
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 8: TRADE HELPERS
-  // Bookkeeping when a trade closes. Tracks P/L and trade history.
   // ═══════════════════════════════════════════════════════════════
 
-  // Called after every sell. Updates running totals and recent trade list.
   function recordTrade(sym, type, pnl) {
     totalProfit += pnl;
     recentTrades.push({ sym, type, pnl, tick: tickCount });
-    if (recentTrades.length > 5) recentTrades.shift();  // keep last 5 for dashboard
+    if (recentTrades.length > 5) recentTrades.shift();
     totalTradeCount++;
   }
 
 
   // ═══════════════════════════════════════════════════════════════
-  // SECTION 9: SELL PHASE
-  // Runs first each tick (before buying). Checks every held position
-  // and exits if the signal has weakened or a cycle flip occurred.
-  //
-  // Exit conditions for longs:
-  //   - Forecast dropped below sell threshold (signal died)
-  //   - Expected return went negative (losing edge)
-  //   - Inversion flag set (market cycle flipped)
-  //
-  // Exit conditions for shorts: mirror image of longs.
+  // SECTION 9: SELL PHASE (shared by Normal, Turtle, Sniper, Spray, Kelly)
   // ═══════════════════════════════════════════════════════════════
 
   function sellPhase() {
-    // Use different ER thresholds depending on data quality
-    // With 4S: sell as soon as ER goes negative (precise data)
-    // With estimates: allow small buffer for noise
     const sellThreshold = has4S ? CONFIG.sellThreshold4S : CONFIG.sellThresholdEst;
 
     for (const sym of Object.keys(stocks)) {
       const s  = stocks[sym];
-      const f  = has4S ? s.forecast : s.estForecast;  // current forecast
-      const er = expectedReturn(s);                    // current expected return
+      const f  = has4S ? s.forecast : s.estForecast;
+      const er = expectedReturn(s);
 
-      // ── Stale position check ──
-      // A position is "stale" if it's been open for > one full cycle (75 ticks)
-      // and the forecast has returned to neutral — no edge left, free the capital.
       const stale = s.positionOpenTick > 0
         && (tickCount - s.positionOpenTick) > CONFIG.staleExitTicks
         && Math.abs(f - 0.5) < CONFIG.staleNeutralBand;
 
-      // ── Exit long positions ──
       if (s.longShares > 0) {
         if (f < CONFIG.forecastSellLong || er < sellThreshold || s.inversionFlag || stale) {
-          // Calculate P/L: what we'd get selling minus what we paid
-          // Zero-trust: validate getSaleGain doesn't throw (can fail if position changed)
           try {
             const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
             ns.stock.sellStock(sym, s.longShares);
             recordTrade(sym, "L", pnl);
             s.ticksSinceAction = 0;
-            s.positionOpenTick = 0;  // position closed — reset age tracker
-          } catch { /* position already closed or API unavailable */ }
+            s.positionOpenTick = 0;
+          } catch { /* */ }
         }
       }
 
-      // ── Exit short positions ──
-      // Shorts profit when price goes DOWN, so conditions are inverted:
-      // sell when forecast goes ABOVE threshold (stock recovering)
       if (s.shortShares > 0 && hasShorts) {
         if (f > CONFIG.forecastSellShort || er > -sellThreshold || s.inversionFlag || stale) {
           try {
@@ -373,8 +396,8 @@ export async function main(ns) {
             ns.stock.sellShort(sym, s.shortShares);
             recordTrade(sym, "S", pnl);
             s.ticksSinceAction = 0;
-            s.positionOpenTick = 0;  // position closed — reset age tracker
-          } catch { hasShorts = false; }  // SF not unlocked for shorts
+            s.positionOpenTick = 0;
+          } catch { hasShorts = false; }
         }
       }
     }
@@ -382,41 +405,27 @@ export async function main(ns) {
 
 
   // ═══════════════════════════════════════════════════════════════
-  // SECTION 10: BUY PHASE
-  // Runs after sell phase. Ranks all stocks by expected return,
-  // then buys the strongest signals within risk limits.
-  //
-  // Risk limits enforced:
-  //   1. Reserve cash: always keep $1m liquid
-  //   2. Max deployment: never invest > 80% of net worth
-  //   3. Per-stock cap: no single stock > 34% of portfolio
-  //   4. Commission-aware: subtracts $100k from each purchase budget
-  //   5. Inversion filter: won't buy stocks mid-cycle-flip
+  // SECTION 10: BUY PHASE (Normal / Turtle / Kelly-compatible base)
   // ═══════════════════════════════════════════════════════════════
 
   function buyPhase() {
-    // ── Flat market short-circuit ──
-    // If every stock has negligible expected return, nothing is worth buying.
-    // Track consecutive flat ticks and skip after the threshold to save API calls.
     const maxER = Object.values(stocks).reduce((mx, s) => Math.max(mx, Math.abs(expectedReturn(s))), 0);
     if (maxER < CONFIG.flatBuySkipFloor) {
-      if (++flatTicks >= CONFIG.flatBuySkipTicks) return;  // market is quiet — skip
+      if (++flatTicks >= CONFIG.flatBuySkipTicks) return;
     } else {
-      flatTicks = 0;  // market has signals — reset counter
+      flatTicks = 0;
     }
 
     const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
-    if (cash < 1e6) return;  // not enough after reserve — skip buying
+    if (cash < 1e6) return;
 
     const tw           = totalWorth(ns);
-    const maxPerStock  = tw * CONFIG.maxPortfolioPct;  // dollar cap per stock
+    const maxPerStock  = tw * CONFIG.maxPortfolioPct;
     const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
-    const invested     = tw - ns.getServerMoneyAvailable("home");  // how much is already in stocks
-    const spendable    = Math.min(cash, tw * CONFIG.maxDeploy - invested);  // respect 80% cap
+    const invested     = tw - ns.getServerMoneyAvailable("home");
+    const spendable    = Math.min(cash, tw * CONFIG.maxDeploy - invested);
     if (spendable < 1e6) return;
 
-    // Rank all stocks by absolute expected return (strongest signal first)
-    // Filter out: weak signals (below threshold) and inverting stocks (mid-flip)
     const ranked = Object.values(stocks)
       .map(s => ({
         sym:      s.sym,
@@ -427,43 +436,34 @@ export async function main(ns) {
       .filter(r => Math.abs(r.er) > buyThreshold && !r.stock.inversionFlag)
       .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
 
-    let avail = spendable;  // remaining budget (decreases as we buy)
+    let avail = spendable;
 
     for (const r of ranked) {
-      if (avail < 2e6) break;  // need at least $2m to make a meaningful purchase
+      if (avail < 2e6) break;
       const s = r.stock;
 
-      // Calculate how much room we have for this stock
-      // (cap - current position value = remaining budget for this stock)
       const curLongVal  = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
       const curShortVal = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
       const budget = Math.min(avail, maxPerStock - curLongVal - curShortVal);
       if (budget < 2e6) continue;
 
-      // ── Buy long on bullish forecast ──
       if (r.forecast > CONFIG.forecastBuyLong) {
-        const price  = ns.stock.getAskPrice(r.sym);  // price we'd pay to buy
-        // Calculate shares: (budget - commission) / price, capped by game's maxShares
+        const price  = ns.stock.getAskPrice(r.sym);
         const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.longShares);
         if (shares > 0) {
-          const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");  // actual cost including spread
+          const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");
           if (cost <= avail) {
-            // Zero-trust: validate buy succeeded before deducting budget
             const boughtAt = ns.stock.buyStock(r.sym, shares);
             if (boughtAt > 0) {
               avail -= cost;
               s.ticksSinceAction = 0;
-              if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;  // mark new position
+              if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
             }
           }
         }
-      }
-      // ── Short on bearish forecast ──
-      // Shorting profits when price drops. We "borrow" shares and sell them,
-      // then buy them back later at a lower price. If price goes UP, we lose.
-      else if (r.forecast < CONFIG.forecastBuyShort && hasShorts) {
+      } else if (r.forecast < CONFIG.forecastBuyShort && hasShorts) {
         try {
-          const price  = ns.stock.getBidPrice(r.sym);  // price we'd get selling
+          const price  = ns.stock.getBidPrice(r.sym);
           const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.shortShares);
           if (shares > 0) {
             const cost = ns.stock.getPurchaseCost(r.sym, shares, "Short");
@@ -472,11 +472,11 @@ export async function main(ns) {
               if (boughtAt > 0) {
                 avail -= cost;
                 s.ticksSinceAction = 0;
-                if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;  // mark new position
+                if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
               }
             }
           }
-        } catch { hasShorts = false; }  // shorting requires Source-File
+        } catch { hasShorts = false; }
       }
     }
   }
@@ -484,23 +484,14 @@ export async function main(ns) {
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 11: YOLO ENGINE
-  // A completely different trading strategy: ONE bet at a time.
-  // Bets 10% of net worth on the single best opportunity.
-  // Sells when forecast flips. 24-minute cooldown after a loss
-  // to prevent tilt-trading (revenge trading after bad luck).
-  //
-  // This mode is intentionally high-risk/high-reward and exists
-  // mostly for fun. Use turtle mode for serious trading.
   // ═══════════════════════════════════════════════════════════════
 
   function yoloBet() {
-    // ── Phase 1: Resolve active bet (if we have one) ──
     if (yolo.activeBet) {
       const bet = yolo.activeBet;
       const s   = stocks[bet.sym];
       const f   = has4S ? s.forecast : s.estForecast;
 
-      // Sell when forecast flips against our position direction
       let shouldSell = false;
       if (bet.type === "Long")  shouldSell = f < 0.5 || s.longShares === 0;
       if (bet.type === "Short") shouldSell = f > 0.5 || s.shortShares === 0;
@@ -519,33 +510,27 @@ export async function main(ns) {
 
         recordTrade(bet.sym, bet.type === "Long" ? "L" : "S", pnl);
 
-        // Update YOLO scoreboard
         if (pnl >= 0) {
           yolo.wins++;
           yolo.totalWon += pnl;
         } else {
           yolo.losses++;
           yolo.totalLost += Math.abs(pnl);
-          // 24-minute cooldown: prevents emotional re-entry after a loss
           yolo.cooldownUntil = Date.now() + 24 * 60 * 1000;
         }
         yolo.history.push(pnl);
         if (yolo.history.length > 20) yolo.history.shift();
-        yolo.activeBet = null;  // ready for next bet
+        yolo.activeBet = null;
       }
-      return;  // don't place new bet in the same tick we resolved one
+      return;
     }
 
-    // ── Phase 2: Cooldown check ──
-    if (Date.now() < yolo.cooldownUntil) return;  // still on cooldown from a loss
+    if (Date.now() < yolo.cooldownUntil) return;
 
-    // ── Phase 3: Place new bet ──
-    // Bet 10% of net worth on the single highest-ER stock
     const tw      = totalWorth(ns);
     const betSize = tw * 0.10;
-    if (betSize < 2e6) return;  // too poor to bet meaningfully
+    if (betSize < 2e6) return;
 
-    // Find the best opportunity: highest |ER|, no inversion, no existing position
     const best = Object.values(stocks)
       .map(s => ({
         sym:   s.sym,
@@ -557,11 +542,9 @@ export async function main(ns) {
                  && r.stock.longShares === 0 && r.stock.shortShares === 0)
       .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))[0];
 
-    if (!best) return;  // no good opportunities right now
+    if (!best) return;
 
-    // Place the bet
     if (best.f > 0.5) {
-      // Bullish — go long
       const price  = ns.stock.getAskPrice(best.sym);
       const shares = Math.min(Math.floor((betSize - CONFIG.commission) / price), best.stock.maxShares);
       if (shares > 0) {
@@ -569,7 +552,6 @@ export async function main(ns) {
         yolo.activeBet = { sym: best.sym, type: "Long", shares, entryPrice: price, tick: tickCount };
       }
     } else if (hasShorts) {
-      // Bearish — go short
       try {
         const price  = ns.stock.getBidPrice(best.sym);
         const shares = Math.min(Math.floor((betSize - CONFIG.commission) / price), best.stock.maxShares);
@@ -583,32 +565,452 @@ export async function main(ns) {
 
 
   // ═══════════════════════════════════════════════════════════════
-  // SECTION 12: LOGGING
-  // Thin wrappers around /lib/logging.js that add script-specific
-  // context (total profit, mode, win/loss counts, etc.)
-  // Logs persist across script restarts within the same aug cycle.
+  // SECTION 11B: MOMENTUM TRADING
+  //
+  // Strategy: only enter when the forecast is accelerating in the
+  // trade direction. momentumScore() measures the rate of forecast
+  // change over the last N ticks. A positive score means the
+  // bullish signal is STRENGTHENING — not just present, but growing.
+  //
+  // Entry: forecast > threshold AND momentumScore > momentumMinScore
+  // Exit:  standard conditions OR momentum reversal (score flips sign)
+  //
+  // Why this works: buying a rising forecast has better timing than
+  // buying a static one. You enter as the signal builds and exit as
+  // it starts to decay — often capturing the peak of the move.
   // ═══════════════════════════════════════════════════════════════
 
-  const LOG_FILE  = "/strats/trade-log.txt";          // human-readable trade history
-  const DATA_FILE = "/strats/session-data.txt";        // machine-readable JSONL snapshots
+  function momentumSellPhase() {
+    const sellThreshold = has4S ? CONFIG.sellThreshold4S : CONFIG.sellThresholdEst;
 
-  // Log a single completed trade with running totals
+    for (const sym of Object.keys(stocks)) {
+      const s  = stocks[sym];
+      const f  = has4S ? s.forecast : s.estForecast;
+      const er = expectedReturn(s);
+      const mo = momentumScore(s);
+
+      const stale = s.positionOpenTick > 0
+        && (tickCount - s.positionOpenTick) > CONFIG.staleExitTicks
+        && Math.abs(f - 0.5) < CONFIG.staleNeutralBand;
+
+      if (s.longShares > 0) {
+        // Exit long when: standard exit OR momentum has turned negative
+        // (0.5x threshold: don't exit on tiny wobbles, only clear reversals)
+        const moReversed = mo < -CONFIG.momentumMinScore * 0.5;
+        if (f < CONFIG.forecastSellLong || er < sellThreshold || s.inversionFlag || stale || moReversed) {
+          try {
+            const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
+            ns.stock.sellStock(sym, s.longShares);
+            recordTrade(sym, "L", pnl);
+            s.ticksSinceAction = 0;
+            s.positionOpenTick = 0;
+          } catch { /* */ }
+        }
+      }
+
+      if (s.shortShares > 0 && hasShorts) {
+        // Exit short when momentum has turned positive
+        const moReversed = mo > CONFIG.momentumMinScore * 0.5;
+        if (f > CONFIG.forecastSellShort || er > -sellThreshold || s.inversionFlag || stale || moReversed) {
+          try {
+            const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
+            ns.stock.sellShort(sym, s.shortShares);
+            recordTrade(sym, "S", pnl);
+            s.ticksSinceAction = 0;
+            s.positionOpenTick = 0;
+          } catch { hasShorts = false; }
+        }
+      }
+    }
+  }
+
+  function momentumBuyPhase() {
+    const maxER = Object.values(stocks).reduce((mx, s) => Math.max(mx, Math.abs(expectedReturn(s))), 0);
+    if (maxER < CONFIG.flatBuySkipFloor) {
+      if (++flatTicks >= CONFIG.flatBuySkipTicks) return;
+    } else {
+      flatTicks = 0;
+    }
+
+    const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
+    if (cash < 1e6) return;
+
+    const tw          = totalWorth(ns);
+    const maxPerStock = tw * CONFIG.maxPortfolioPct;
+    const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
+    const invested    = tw - ns.getServerMoneyAvailable("home");
+    const spendable   = Math.min(cash, tw * CONFIG.maxDeploy - invested);
+    if (spendable < 1e6) return;
+
+    const ranked = Object.values(stocks)
+      .map(s => ({
+        sym:      s.sym,
+        er:       expectedReturn(s),
+        forecast: has4S ? s.forecast : s.estForecast,
+        mo:       momentumScore(s),
+        stock:    s,
+      }))
+      .filter(r => {
+        if (Math.abs(r.er) <= buyThreshold) return false;
+        if (r.stock.inversionFlag) return false;
+        // Momentum confirmation filter: forecast must be actively moving toward the trade
+        if (r.forecast > CONFIG.forecastBuyLong  && r.mo < CONFIG.momentumMinScore)  return false;
+        if (r.forecast < CONFIG.forecastBuyShort && r.mo > -CONFIG.momentumMinScore) return false;
+        return true;
+      })
+      .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
+
+    let avail = spendable;
+    for (const r of ranked) {
+      if (avail < 2e6) break;
+      const s = r.stock;
+
+      const curLongVal  = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
+      const curShortVal = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
+      const budget = Math.min(avail, maxPerStock - curLongVal - curShortVal);
+      if (budget < 2e6) continue;
+
+      if (r.forecast > CONFIG.forecastBuyLong) {
+        const price  = ns.stock.getAskPrice(r.sym);
+        const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.longShares);
+        if (shares > 0) {
+          const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");
+          if (cost <= avail) {
+            const boughtAt = ns.stock.buyStock(r.sym, shares);
+            if (boughtAt > 0) {
+              avail -= cost;
+              s.ticksSinceAction = 0;
+              if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+            }
+          }
+        }
+      } else if (r.forecast < CONFIG.forecastBuyShort && hasShorts) {
+        try {
+          const price  = ns.stock.getBidPrice(r.sym);
+          const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.shortShares);
+          if (shares > 0) {
+            const cost = ns.stock.getPurchaseCost(r.sym, shares, "Short");
+            if (cost <= avail) {
+              const boughtAt = ns.stock.buyShort(r.sym, shares);
+              if (boughtAt > 0) {
+                avail -= cost;
+                s.ticksSinceAction = 0;
+                if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+              }
+            }
+          }
+        } catch { hasShorts = false; }
+      }
+    }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 11C: SNIPER MODE
+  //
+  // Strategy: wait for a very rare, very high-conviction setup,
+  // then place a large concentrated bet (up to 45% of worth).
+  // Maximum 3 concurrent positions — this is not diversification,
+  // this is precision targeting.
+  //
+  // Entry requirements:
+  //   1. ER > 0.004 (40x Normal threshold) — extremely strong signal
+  //   2. Forecast > 0.70 / < 0.30 (vs 0.575 / 0.425 in Normal)
+  //   3. When 4S available: estimated forecast must agree on direction
+  //   4. No inversion flag
+  //   5. Fewer than 3 open positions
+  //
+  // The agreement check (4S + estimated) filters out cases where
+  // the official forecast looks great but the price history tells
+  // a different story — a common sign of an imminent flip.
+  // ═══════════════════════════════════════════════════════════════
+
+  function sniperBuy() {
+    const positionCount = Object.values(stocks).filter(s => s.longShares > 0 || s.shortShares > 0).length;
+    if (positionCount >= CONFIG.sniperMaxPositions) return;
+
+    const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
+    if (cash < 2e6) return;
+
+    const tw       = totalWorth(ns);
+    const invested = tw - ns.getServerMoneyAvailable("home");
+    const spendable = Math.min(cash, tw * CONFIG.maxDeploy - invested);
+    if (spendable < 2e6) return;
+
+    const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
+
+    // Find the single best opportunity that clears all sniper filters
+    const best = Object.values(stocks)
+      .filter(s => s.longShares === 0 && s.shortShares === 0 && !s.inversionFlag)
+      .map(s => {
+        const er  = expectedReturn(s);
+        const f4S = has4S ? s.forecast : null;
+        const fEst = s.estForecast;
+        // Agreement check: 4S and estimated forecast must agree on direction
+        const agree = !has4S || !CONFIG.sniperFcstConfirm
+          || (f4S > 0.5 && fEst > 0.52)
+          || (f4S < 0.5 && fEst < 0.48);
+        return { sym: s.sym, er, f: has4S ? s.forecast : s.estForecast, stock: s, agree };
+      })
+      .filter(r => Math.abs(r.er) > buyThreshold && r.agree)
+      .filter(r => r.f > CONFIG.forecastBuyLong || r.f < CONFIG.forecastBuyShort)
+      .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))[0];
+
+    if (!best) return;
+
+    const maxPerStock = tw * CONFIG.maxPortfolioPct;
+    const budget = Math.min(spendable, maxPerStock);
+    if (budget < 2e6) return;
+
+    if (best.f > CONFIG.forecastBuyLong) {
+      const price  = ns.stock.getAskPrice(best.sym);
+      const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), best.stock.maxShares);
+      if (shares > 0) {
+        const cost = ns.stock.getPurchaseCost(best.sym, shares, "Long");
+        if (cost <= spendable) {
+          const boughtAt = ns.stock.buyStock(best.sym, shares);
+          if (boughtAt > 0) {
+            best.stock.ticksSinceAction = 0;
+            if (best.stock.positionOpenTick === 0) best.stock.positionOpenTick = tickCount;
+          }
+        }
+      }
+    } else if (best.f < CONFIG.forecastBuyShort && hasShorts) {
+      try {
+        const price  = ns.stock.getBidPrice(best.sym);
+        const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), best.stock.maxShares);
+        if (shares > 0) {
+          const cost = ns.stock.getPurchaseCost(best.sym, shares, "Short");
+          if (cost <= spendable) {
+            const boughtAt = ns.stock.buyShort(best.sym, shares);
+            if (boughtAt > 0) {
+              best.stock.ticksSinceAction = 0;
+              if (best.stock.positionOpenTick === 0) best.stock.positionOpenTick = tickCount;
+            }
+          }
+        }
+      } catch { hasShorts = false; }
+    }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 11D: SPRAY MODE
+  //
+  // Strategy: buy everything with any positive signal, spread capital
+  // thinly across up to 10 stocks simultaneously. Low ER threshold
+  // means many trades, but diversification smooths the variance.
+  //
+  // Best used: large bankroll (>$500m) because commission ($100k/trade)
+  // is negligible relative to position size. At low bankrolls, the
+  // commission overhead will eat the thin edge.
+  //
+  // Budget allocation: spendable / remaining_slots per stock.
+  // If slots run out, waits for existing positions to close first.
+  // ═══════════════════════════════════════════════════════════════
+
+  function sprayBuy() {
+    const held = Object.values(stocks).filter(s => s.longShares > 0 || s.shortShares > 0);
+    const slotsAvail = CONFIG.sprayMaxPositions - held.length;
+    if (slotsAvail <= 0) return;
+
+    const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
+    if (cash < 1e6) return;
+
+    const tw       = totalWorth(ns);
+    const invested = tw - ns.getServerMoneyAvailable("home");
+    const spendable = Math.min(cash, tw * CONFIG.maxDeploy - invested);
+    if (spendable < 1e6) return;
+
+    const maxPerStock  = tw * CONFIG.maxPortfolioPct;
+    const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
+
+    // Rank all unowned stocks with any detectable signal
+    const candidates = Object.values(stocks)
+      .filter(s => s.longShares === 0 && s.shortShares === 0 && !s.inversionFlag)
+      .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, stock: s }))
+      .filter(r => Math.abs(r.er) > buyThreshold
+                && (r.f > CONFIG.forecastBuyLong || r.f < CONFIG.forecastBuyShort))
+      .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))
+      .slice(0, slotsAvail);
+
+    if (candidates.length === 0) return;
+
+    // Split spendable evenly across candidates (capped at maxPerStock)
+    const perSlot = Math.min(spendable / candidates.length, maxPerStock);
+    let avail = spendable;
+
+    for (const r of candidates) {
+      if (avail < 2e6) break;
+      const budget = Math.min(avail, perSlot);
+      if (budget < 2e6) continue;
+
+      if (r.f > CONFIG.forecastBuyLong) {
+        const price  = ns.stock.getAskPrice(r.sym);
+        const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), r.stock.maxShares);
+        if (shares > 0) {
+          const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");
+          if (cost <= avail) {
+            const boughtAt = ns.stock.buyStock(r.sym, shares);
+            if (boughtAt > 0) {
+              avail -= cost;
+              r.stock.ticksSinceAction = 0;
+              if (r.stock.positionOpenTick === 0) r.stock.positionOpenTick = tickCount;
+            }
+          }
+        }
+      } else if (r.f < CONFIG.forecastBuyShort && hasShorts) {
+        try {
+          const price  = ns.stock.getBidPrice(r.sym);
+          const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), r.stock.maxShares);
+          if (shares > 0) {
+            const cost = ns.stock.getPurchaseCost(r.sym, shares, "Short");
+            if (cost <= avail) {
+              const boughtAt = ns.stock.buyShort(r.sym, shares);
+              if (boughtAt > 0) {
+                avail -= cost;
+                r.stock.ticksSinceAction = 0;
+                if (r.stock.positionOpenTick === 0) r.stock.positionOpenTick = tickCount;
+              }
+            }
+          }
+        } catch { hasShorts = false; }
+      }
+    }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 11E: KELLY CRITERION POSITION SIZING
+  //
+  // Strategy: allocate capital proportionally to Kelly fractions
+  // instead of equal weighting. Stocks with a better edge/risk
+  // ratio get bigger positions; marginal signals get less capital.
+  //
+  // Kelly fraction (simplified): f_i = |ER_i| / volatility_i
+  // Budget for stock i = (f_i / sum_all_f) * spendable
+  //
+  // This is mathematically the allocation that maximizes long-run
+  // geometric growth. In practice, full-Kelly is often too aggressive,
+  // so positions are still capped at maxPortfolioPct.
+  //
+  // Why better than equal weighting: a stock with ER=0.003 and vol=0.01
+  // (kelly=0.3) gets 3x more capital than one with ER=0.001 and vol=0.01
+  // (kelly=0.1). Equal weighting ignores this difference entirely.
+  // ═══════════════════════════════════════════════════════════════
+
+  function kellyBuyPhase() {
+    const maxER = Object.values(stocks).reduce((mx, s) => Math.max(mx, Math.abs(expectedReturn(s))), 0);
+    if (maxER < CONFIG.flatBuySkipFloor) {
+      if (++flatTicks >= CONFIG.flatBuySkipTicks) return;
+    } else {
+      flatTicks = 0;
+    }
+
+    const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
+    if (cash < 1e6) return;
+
+    const tw       = totalWorth(ns);
+    const invested = tw - ns.getServerMoneyAvailable("home");
+    const spendable = Math.min(cash, tw * CONFIG.maxDeploy - invested);
+    if (spendable < 1e6) return;
+
+    const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
+    const maxPerStock  = tw * CONFIG.maxPortfolioPct;
+
+    // Build candidates with Kelly fractions
+    const candidates = Object.values(stocks)
+      .map(s => ({
+        sym:    s.sym,
+        er:     expectedReturn(s),
+        f:      has4S ? s.forecast : s.estForecast,
+        kelly:  kellyFraction(s),
+        stock:  s,
+      }))
+      .filter(r => {
+        if (Math.abs(r.er) < buyThreshold) return false;
+        if (r.stock.inversionFlag) return false;
+        if (r.f > CONFIG.forecastBuyLong || r.f < CONFIG.forecastBuyShort) return true;
+        return false;
+      })
+      .sort((x, y) => y.kelly - x.kelly);
+
+    if (candidates.length === 0) return;
+
+    // Normalize Kelly fractions to sum to 1 — proportional budget allocation
+    const totalKelly = candidates.reduce((s, r) => s + r.kelly, 0);
+    let avail = spendable;
+
+    for (const r of candidates) {
+      if (avail < 2e6) break;
+      const s = r.stock;
+
+      // Proportional Kelly budget, capped at maxPortfolioPct
+      const kellyShare   = totalKelly > 0 ? r.kelly / totalKelly : 1 / candidates.length;
+      const kellyBudget  = spendable * kellyShare;
+      const curLongVal   = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
+      const curShortVal  = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
+      const budget = Math.min(avail, maxPerStock - curLongVal - curShortVal, kellyBudget);
+      if (budget < 2e6) continue;
+
+      if (r.f > CONFIG.forecastBuyLong) {
+        const price  = ns.stock.getAskPrice(r.sym);
+        const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.longShares);
+        if (shares > 0) {
+          const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");
+          if (cost <= avail) {
+            const boughtAt = ns.stock.buyStock(r.sym, shares);
+            if (boughtAt > 0) {
+              avail -= cost;
+              s.ticksSinceAction = 0;
+              if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+            }
+          }
+        }
+      } else if (r.f < CONFIG.forecastBuyShort && hasShorts) {
+        try {
+          const price  = ns.stock.getBidPrice(r.sym);
+          const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.shortShares);
+          if (shares > 0) {
+            const cost = ns.stock.getPurchaseCost(r.sym, shares, "Short");
+            if (cost <= avail) {
+              const boughtAt = ns.stock.buyShort(r.sym, shares);
+              if (boughtAt > 0) {
+                avail -= cost;
+                s.ticksSinceAction = 0;
+                if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+              }
+            }
+          }
+        } catch { hasShorts = false; }
+      }
+    }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 12: LOGGING
+  // ═══════════════════════════════════════════════════════════════
+
+  const LOG_FILE  = "/strats/trade-log.txt";
+  const DATA_FILE = "/strats/session-data.txt";
+
   function doLogTrade(trade) {
     const tw = totalWorth(ns);
     logTrade(ns, LOG_FILE, trade,
       ` | Total:${ns.formatNumber(totalProfit)} | Worth:${ns.formatNumber(tw)}`);
   }
 
-  // Snapshot session state every 100 ticks (for performance analysis)
   function doLogSession() {
     const tw      = totalWorth(ns);
     const elapsed = (Date.now() - sessionStart) / 60000;
     const wins    = recentTrades.filter(t => t.pnl >= 0).length;
     const losses  = recentTrades.filter(t => t.pnl < 0).length;
+    const mode    = TURTLE ? "turtle" : YOLO ? "yolo" : MOMENTUM ? "momentum"
+                  : SNIPER ? "sniper" : SPRAY ? "spray" : KELLY ? "kelly" : "normal";
     logSnapshot(ns, DATA_FILE, {
       tick: tickCount, timestamp: Date.now(),
-      mode: TURTLE ? "turtle" : (YOLO ? "yolo" : "normal"),
-      has4S, worth: tw,
+      mode, has4S, worth: tw,
       cash: ns.getServerMoneyAvailable("home"),
       profit: totalProfit,
       profitPerMin: totalProfit / Math.max(1, elapsed),
@@ -619,55 +1021,67 @@ export async function main(ns) {
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 13: DASHBOARD
-  // Renders the live trading display in the tail window.
-  // Shows: mode, portfolio summary, sparkline, positions table,
-  //        recent trades, top opportunities (or YOLO scoreboard).
-  // Redraws completely every tick (clearLog + reprint).
   // ═══════════════════════════════════════════════════════════════
 
   function printDashboard() {
-    // ── Calculate all display values ──
     const tw       = totalWorth(ns);
     const cash     = ns.getServerMoneyAvailable("home");
-    const invested = tw - cash;                                         // how much is in stocks
-    const elapsed  = ((Date.now() - sessionStart) / 60000).toFixed(1);  // minutes since start
-    const startW   = worthHistory.length > 0 ? worthHistory[0] : tw;    // initial worth for return calc
-    const ret      = startW > 0 ? (tw - startW) / startW : 0;          // session return percentage
+    const invested = tw - cash;
+    const elapsed  = ((Date.now() - sessionStart) / 60000).toFixed(1);
+    const startW   = worthHistory.length > 0 ? worthHistory[0] : tw;
+    const ret      = startW > 0 ? (tw - startW) / startW : 0;
 
-    // Profit rate projections (extrapolated from session average)
     const ppm      = totalProfit / Math.max(1, (Date.now() - sessionStart) / 60000);
-    const pph      = ppm * 60;       // per hour
-    const pp24     = ppm * 1440;     // per 24 hours
+    const pph      = ppm * 60;
+    const pp24     = ppm * 1440;
 
-    // Win/loss from recent trades (dashboard only, not lifetime)
     const wins     = recentTrades.filter(t => t.pnl >= 0).length;
     const losses   = recentTrades.filter(t => t.pnl < 0).length;
 
-    // Track net worth for sparkline graph (max 120 samples = 120 ticks ≈ 12min)
     worthHistory.push(tw);
     if (worthHistory.length > 120) worthHistory.shift();
 
-    // ── Wipe and redraw everything ──
     ns.clearLog();
 
-    // Mode indicator (color-coded for quick visual identification)
     let modeStr   = "NORMAL";
     let modeColor = C.cyan;
-    if (TURTLE) { modeStr = "TURTLE UP";          modeColor = C.green; }
-    if (YOLO)   { modeStr = "GO BIG OR GO HOME";  modeColor = C.mag; }
+    if (TURTLE)   { modeStr = "TURTLE UP";          modeColor = C.green; }
+    if (YOLO)     { modeStr = "GO BIG OR GO HOME";  modeColor = C.mag; }
+    if (MOMENTUM) { modeStr = "MOMENTUM";            modeColor = C.yellow; }
+    if (SNIPER)   { modeStr = "SNIPER";              modeColor = C.red; }
+    if (SPRAY)    { modeStr = "SPRAY & PRAY";        modeColor = C.cyan; }
+    if (KELLY)    { modeStr = "KELLY CRITERION";     modeColor = C.green; }
 
-    // ── Header ──
     ns.print("╔══════════════════════════════════════════════════════════════╗");
-    ns.print(`║  ${C.bold("FINAL STONKINTON")}  ${modeColor("[ " + modeStr + " ]")}`);
+    ns.print(`║  ${C.bold("STOCKSDONE")}  ${modeColor("[ " + modeStr + " ]")}`);
     ns.print("╠══════════════════════════════════════════════════════════════╣");
     ns.print(`║ ${has4S ? C.green("4S DATA") : C.yellow("ESTIMATED")} | Shorts: ${hasShorts ? C.green("ON") : C.red("OFF")} | Tick: ${C.cyan(String(tickCount))} | ${elapsed}min | ${C.dim(THEME)}`);
 
-    // Show proven strategy info in turtle mode (so you know which params loaded)
     if (TURTLE && provenParams) {
       ns.print(`║ ${C.green("Proven strat: " + provenParams.name)} (${provenParams.ticksTested} ticks)`);
     }
 
-    // ── Portfolio summary ──
+    // ── Mode-specific status line ──
+    if (SNIPER) {
+      const posCount = Object.values(stocks).filter(s => s.longShares > 0 || s.shortShares > 0).length;
+      const confirmStr = CONFIG.sniperFcstConfirm ? C.green("AGREE") : C.dim("OFF");
+      ns.print(`║ ${C.red("SNIPER")} Positions: ${posCount}/${CONFIG.sniperMaxPositions} | 4S+Est confirm: ${confirmStr}`);
+    }
+    if (SPRAY) {
+      const posCount = Object.values(stocks).filter(s => s.longShares > 0 || s.shortShares > 0).length;
+      ns.print(`║ ${C.cyan("SPRAY")} Positions: ${posCount}/${CONFIG.sprayMaxPositions}`);
+    }
+    if (KELLY) {
+      // Show top Kelly fractions for held positions
+      const top = Object.values(stocks)
+        .filter(s => s.longShares > 0 || s.shortShares > 0)
+        .map(s => ({ sym: s.sym, k: kellyFraction(s) }))
+        .sort((x, y) => y.k - x.k).slice(0, 3);
+      if (top.length > 0) {
+        ns.print(`║ ${C.green("KELLY")} top: ${top.map(t => `${t.sym}=${t.k.toFixed(3)}`).join(" ")}`);
+      }
+    }
+
     ns.print("╠══════════════════════════════════════════════════════════════╣");
     ns.print(`║ Net Worth:  ${C.bold(ns.formatNumber(tw, 2).padStart(14))}  ${C.pct(ret)}`);
     ns.print(`║ Cash:       ${ns.formatNumber(cash, 2).padStart(14)}`);
@@ -675,13 +1089,12 @@ export async function main(ns) {
     ns.print(`║ Session P/L:${C.plcol(totalProfit, ns.formatNumber(totalProfit, 2).padStart(14))}`);
     ns.print(`║  /min: ${C.plcol(ppm, ns.formatNumber(ppm, 2))}  /hr: ${C.plcol(pph, ns.formatNumber(pph, 2))}  /24hr: ${C.plcol(pp24, ns.formatNumber(pp24, 2))}`);
 
-    // ── Net worth sparkline (mini graph using Unicode block chars) ──
     if (worthHistory.length > 2) {
       const color = worthHistory[worthHistory.length - 1] >= worthHistory[0] ? C.green : C.red;
       ns.print(`║ ${color(sparkline(worthHistory, 40))}`);
     }
 
-    // ── YOLO scoreboard (only shown in YOLO mode) ──
+    // ── YOLO scoreboard ──
     if (YOLO) {
       ns.print("╠══════════════════════════════════════════════════════════════╣");
       ns.print(`║ ${C.mag(C.bold("YOLO SCOREBOARD"))}`);
@@ -693,15 +1106,13 @@ export async function main(ns) {
         const wr = yolo.wins / (yolo.wins + yolo.losses);
         ns.print(`║ Win Rate: ${C.pct(wr - 0.5)} (${(wr * 100).toFixed(0)}%)`);
       }
-      // Visual W/L streak (colored letters)
       if (yolo.history.length > 0) {
         ns.print(`║ ${yolo.history.map(v => v >= 0 ? C.green("W") : C.red("L")).join("")}`);
       }
-      // Show current active bet with live P/L
       if (yolo.activeBet) {
         const curPrice = ns.stock.getPrice(yolo.activeBet.sym);
         const chg      = (curPrice - yolo.activeBet.entryPrice) / yolo.activeBet.entryPrice;
-        const dir      = yolo.activeBet.type === "Long" ? chg : -chg;  // invert for shorts
+        const dir      = yolo.activeBet.type === "Long" ? chg : -chg;
         ns.print(`║ ${C.bold("BET:")} ${yolo.activeBet.type} ${yolo.activeBet.sym} ${C.pct(dir)}`);
       }
     }
@@ -711,13 +1122,11 @@ export async function main(ns) {
     ns.print("║ Symbol ║ Fcst  ║  Vol  ║ Position   ║ Unrl P/L ║ Return  ║");
     ns.print("╠════════╬═══════╬═══════╬════════════╬══════════╬═════════╣");
 
-    // Build position rows: filter to stocks we actually hold, calculate P/L
     const positions = Object.values(stocks)
       .filter(s => s.longShares > 0 || s.shortShares > 0)
       .map(s => {
         let pnl, cost;
         if (s.longShares > 0) {
-          // P/L = what we'd get selling now minus what we paid
           pnl  = ns.stock.getSaleGain(s.sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
           cost = s.longShares * s.longAvgPrice;
         } else {
@@ -726,13 +1135,13 @@ export async function main(ns) {
         }
         return { ...s, pnl, cost, ret: cost > 0 ? pnl / cost : 0 };
       })
-      .sort((x, y) => y.pnl - x.pnl);  // best performers first
+      .sort((x, y) => y.pnl - x.pnl);
 
     for (const s of positions) {
       const f   = (has4S ? s.forecast : s.estForecast).toFixed(3);
       const v   = (has4S ? s.volatility : estimateVolatility(s.priceHistory)).toFixed(3);
       const pos = s.longShares > 0 ? `L:${ns.formatNumber(s.longShares, 0)}` : `S:${ns.formatNumber(s.shortShares, 0)}`;
-      const inv = s.inversionFlag ? C.red("!") : " ";  // red "!" = cycle flip warning
+      const inv = s.inversionFlag ? C.red("!") : " ";
       const pnlStr = C.plcol(s.pnl, ((s.pnl >= 0 ? "+" : "") + ns.formatNumber(s.pnl, 0)).padStart(8));
       ns.print(`║ ${(s.sym + inv).padEnd(6)} ║ ${f} ║ ${v} ║ ${pos.padEnd(10)} ║ ${pnlStr} ║ ${C.pct(s.ret)} ║`);
     }
@@ -742,7 +1151,7 @@ export async function main(ns) {
     }
     ns.print("╚════════╩═══════╩═══════╩════════════╩══════════╩═════════╝");
 
-    // ── Recent trades with win/loss ratio ──
+    // ── Recent trades ──
     if (recentTrades.length > 0) {
       const ratio = wins + losses > 0 ? (wins / (wins + losses) * 100).toFixed(0) + "%" : "n/a";
       ns.print(C.dim(` Recent (W:${C.green(String(wins))} L:${C.red(String(losses))} | ${ratio} | Total: ${totalTradeCount}):`));
@@ -752,19 +1161,52 @@ export async function main(ns) {
       }
     }
 
-    // ── Top opportunities radar (not shown in YOLO — one bet at a time) ──
+    // ── Opportunity radar (mode-specific) ──
     if (!YOLO) {
-      const opps = Object.values(stocks)
-        .filter(s => s.longShares === 0 && s.shortShares === 0)
-        .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, inv: s.inversionFlag }))
-        .filter(o => Math.abs(o.er) > 0.0001 && !o.inv)
-        .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))
-        .slice(0, 5);
-      if (opps.length > 0) {
-        ns.print(C.dim(" Top Opportunities:"));
-        for (const o of opps) {
-          const dir = o.f > 0.5 ? C.green("LONG ") : C.red("SHORT");
-          ns.print(`   ${dir} ${o.sym.padEnd(5)} Fcst: ${o.f.toFixed(3)} ER: ${o.er.toFixed(5)}`);
+      if (MOMENTUM) {
+        // Show top momentum movers (forecast acceleration)
+        const movers = Object.values(stocks)
+          .map(s => ({ sym: s.sym, mo: momentumScore(s), f: has4S ? s.forecast : s.estForecast }))
+          .filter(r => Math.abs(r.mo) > 0.001)
+          .sort((x, y) => Math.abs(y.mo) - Math.abs(x.mo))
+          .slice(0, 5);
+        if (movers.length > 0) {
+          ns.print(C.dim(" Momentum Radar (forecast accel/tick):"));
+          for (const m of movers) {
+            const arrow = m.mo > 0 ? C.green("↑") : C.red("↓");
+            const confirmed = Math.abs(m.mo) >= CONFIG.momentumMinScore ? C.green("✓") : C.dim("·");
+            ns.print(`   ${arrow}${confirmed} ${m.sym.padEnd(5)} Fcst:${m.f.toFixed(3)} Δ:${(m.mo*1000).toFixed(2)}‰/t`);
+          }
+        }
+      } else if (KELLY) {
+        // Show Kelly fractions for top unowned opportunities
+        const opps = Object.values(stocks)
+          .filter(s => s.longShares === 0 && s.shortShares === 0 && !s.inversionFlag)
+          .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, k: kellyFraction(s) }))
+          .filter(o => Math.abs(o.er) > (has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst))
+          .sort((x, y) => y.k - x.k)
+          .slice(0, 5);
+        if (opps.length > 0) {
+          ns.print(C.dim(" Kelly Opportunities (f=kelly fraction):"));
+          for (const o of opps) {
+            const dir = o.f > 0.5 ? C.green("LONG ") : C.red("SHORT");
+            ns.print(`   ${dir} ${o.sym.padEnd(5)} Fcst:${o.f.toFixed(3)} ER:${o.er.toFixed(5)} f=${o.k.toFixed(4)}`);
+          }
+        }
+      } else {
+        // Normal/Turtle/Sniper/Spray: standard opportunity list
+        const opps = Object.values(stocks)
+          .filter(s => s.longShares === 0 && s.shortShares === 0)
+          .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, inv: s.inversionFlag }))
+          .filter(o => Math.abs(o.er) > 0.0001 && !o.inv)
+          .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))
+          .slice(0, 5);
+        if (opps.length > 0) {
+          ns.print(C.dim(" Top Opportunities:"));
+          for (const o of opps) {
+            const dir = o.f > 0.5 ? C.green("LONG ") : C.red("SHORT");
+            ns.print(`   ${dir} ${o.sym.padEnd(5)} Fcst: ${o.f.toFixed(3)} ER: ${o.er.toFixed(5)}`);
+          }
         }
       }
     }
@@ -773,31 +1215,16 @@ export async function main(ns) {
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 14: MAIN TRADING LOOP
-  // The core loop that runs forever (until script is killed).
-  // Each iteration = one market tick (~6 seconds in Bitburner).
-  //
-  // Order of operations each tick:
-  //   1. Wait for market tick (nextUpdate or fallback sleep)
-  //   2. Periodically upgrade market access
-  //   3. Update all stock data (prices, positions, estimates)
-  //   4. Warmup check (skip trading if <10 ticks of data)
-  //   5. Execute trades (sell first, then buy — or YOLO bet)
-  //   6. Log any new trades
-  //   7. Periodic session snapshot
-  //   8. Redraw dashboard
   // ═══════════════════════════════════════════════════════════════
 
-  // Write session header to log file
-  const modeName = TURTLE ? "TURTLE" : (YOLO ? "YOLO" : "NORMAL");
+  const modeName = TURTLE ? "TURTLE" : YOLO ? "YOLO" : MOMENTUM ? "MOMENTUM"
+                 : SNIPER ? "SNIPER" : SPRAY ? "SPRAY" : KELLY ? "KELLY" : "NORMAL";
   ns.write(LOG_FILE, `\n=== Session ${new Date().toISOString()} | ${modeName} ===\n`, "a");
 
   while (true) {
-    // Wait for the game's stock market to tick (fires every ~6 seconds)
-    // Fallback to sleep if nextUpdate throws (older Bitburner versions)
     try { await ns.stock.nextUpdate(); } catch { await ns.sleep(6000); }
     tickCount++;
 
-    // Every 50 ticks: try to upgrade market access (in case player earned money)
     if (tickCount % 50 === 0) {
       if (CONFIG.autoBuyAccess) tryBuyAccess(ns);
       ({ hasTIX, has4S } = checkAccess(ns));
@@ -807,41 +1234,54 @@ export async function main(ns) {
     for (const sym of symbols) {
       const s = stocks[sym];
 
-      // Record current price and trim history to window size
       s.priceHistory.push(ns.stock.getPrice(sym));
       if (s.priceHistory.length > CONFIG.tickHistoryLen) s.priceHistory.shift();
 
-      // Sync position data from game (shares owned, avg price paid)
       const [ls, lap, ss, sap] = ns.stock.getPosition(sym);
       s.longShares = ls;  s.longAvgPrice = lap;
       s.shortShares = ss; s.shortAvgPrice = sap;
 
-      // Always run estimation (keeps inversion detection warm even with 4S)
       runEstimation(s);
 
-      // Overlay 4S data when available (more accurate than estimates)
       if (has4S) {
         s.forecast   = ns.stock.getForecast(sym);
         s.volatility = ns.stock.getVolatility(sym);
       }
 
+      // Record forecast history for momentum tracking
+      // (push AFTER 4S overlay so history reflects best available forecast)
+      const fNow = has4S ? s.forecast : s.estForecast;
+      s.forecastHistory.push(fNow);
+      if (s.forecastHistory.length > 10) s.forecastHistory.shift();
+
       s.ticksSinceAction++;
     }
 
-    // Need ~10 ticks of price data before estimates are usable
     if (!has4S && tickCount < 10) { printDashboard(); continue; }
 
-    // ── Execute trades ──
+    // ── Execute trades — route to the right strategy ──
     const tradesBefore = totalTradeCount;
 
     if (YOLO) {
-      yoloBet();       // YOLO: one bet at a time
+      yoloBet();
+    } else if (MOMENTUM) {
+      momentumSellPhase();
+      momentumBuyPhase();
+    } else if (SNIPER) {
+      sellPhase();
+      sniperBuy();
+    } else if (SPRAY) {
+      sellPhase();
+      sprayBuy();
+    } else if (KELLY) {
+      sellPhase();
+      kellyBuyPhase();
     } else {
-      sellPhase();     // Normal/Turtle: sell weak positions first
-      buyPhase();      // then buy strong signals with freed cash
+      sellPhase();   // Normal / Turtle
+      buyPhase();
     }
 
-    // ── Log any trades that happened this tick ──
+    // ── Log new trades ──
     const newTrades = totalTradeCount - tradesBefore;
     if (newTrades > 0) {
       for (let i = recentTrades.length - newTrades; i < recentTrades.length; i++) {
@@ -849,10 +1289,8 @@ export async function main(ns) {
       }
     }
 
-    // Snapshot session data every 100 ticks (~10 minutes)
     if (tickCount % 100 === 0) doLogSession();
 
-    // Redraw the dashboard
     printDashboard();
   }
 }

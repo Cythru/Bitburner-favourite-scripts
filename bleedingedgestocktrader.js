@@ -1,9 +1,35 @@
 // Usage: run bleedingedgestocktrader.js [--liquidate] [--theme classic|neon|matrix|ocean|fire]
-import { getTheme, makeColors } from "/lib/themes.js";
-import { tryBuyAccess, checkAccess, waitForTIX } from "/lib/market.js";
-import { estimateForecast, estimateVolatility, calcMomentum } from "/lib/estimate.js";
-import { totalWorth, sparkline } from "/lib/portfolio.js";
-import { logTrade, logSnapshot } from "/lib/logging.js";
+// Lib files loaded dynamically — built-in fallbacks activate if any /lib/ file is absent.
+
+// ── Built-in fallbacks ──
+function _fbGetTheme(ns){const i=ns.args.indexOf("--theme");return{theme:null,name:i>=0?String(ns.args[i+1]||"classic"):"classic"};}
+function _fbMakeColors(){const id=s=>String(s);return{green:id,red:id,cyan:id,yellow:id,mag:id,dim:id,bold:id,pct:v=>(v>=0?"+":"")+(v*100).toFixed(1)+"%",plcol:(_,s)=>String(s)};}
+function _fbTryBuyAccess(ns){const m=ns.getServerMoneyAvailable("home");try{if(m>200e6)ns.stock.purchaseWseAccount();}catch{}try{if(m>5e9)ns.stock.purchaseTixApi();}catch{}try{if(m>1e9)ns.stock.purchase4SMarketData();}catch{}try{if(m>25e9)ns.stock.purchase4SMarketDataTixApi();}catch{}}
+function _fbCheckAccess(ns){let t=false,s=false;try{t=ns.stock.hasTIXAPIAccess();}catch{}try{s=ns.stock.has4SDataTIXAPI();}catch{}return{hasTIX:t,has4S:s};}
+async function _fbWaitForTIX(ns){while(true){_fbTryBuyAccess(ns);try{if(ns.stock.hasTIXAPIAccess())return _fbCheckAccess(ns);}catch{}ns.tprint("Waiting for TIX API...");await ns.sleep(30000);}}
+function _fbEstFc(h,lW,sW,iD){const n=h.length;if(n<3)return{forecast:0.5,forecastShort:0.5,inversionFlag:false};const lL=Math.min(lW,n-1),sL=Math.min(sW,n-1),lS=n-lL,sS=n-sL;let lU=0,sU=0;for(let i=lS;i<n;i++){if(h[i]>h[i-1]){lU++;if(i>=sS)sU++;}}const f=lU/lL,fs=sU/sL,x=(f>0.5)!==(fs>0.5);return{forecast:f,forecastShort:fs,inversionFlag:x&&Math.abs(f-fs)>iD};}
+function _fbEstVol(h){const n=h.length;if(n<2)return 0.01;const w=Math.min(20,n-1),s=n-w;let sum=0;for(let i=s;i<n;i++)sum+=Math.abs(h[i]-h[i-1])/h[i-1];return sum/w;}
+function _fbCalcMomentum(h){if(h.length<6)return 0;const n=h.length,s=n-5;let sc=0;for(let i=s;i<n;i++){const w=1+(i-s)*0.5;sc+=h[i]>h[i-1]?w:-w;}return sc/10;}
+function _fbTotalWorth(ns){let w=ns.getServerMoneyAvailable("home");try{for(const s of ns.stock.getSymbols()){const[l,,sh]=ns.stock.getPosition(s);if(l>0)w+=ns.stock.getSaleGain(s,l,"Long");if(sh>0)w+=ns.stock.getSaleGain(s,sh,"Short");}}catch{}return w;}
+function _fbSparkline(data,width=40){if(data.length<2)return"─".repeat(width);let mn=data[0],mx=data[0];for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}const r=mx-mn||1,B="▁▂▃▄▅▆▇█";let o="";for(let i=0;i<width;i++){const idx=Math.min(data.length-1,Math.floor(i*(data.length-1)/Math.max(1,width-1)));o+=B[Math.min(7,Math.floor((data[idx]-mn)/r*8))];}return o;}
+function _fbLogTrade(ns,f,t,x=""){ns.write(f,`[T${t.tick}] ${t.type} ${t.sym} P/L:${t.pnl>=0?"+":""}${Math.round(t.pnl)}${x}\n`,"a");}
+function _fbLogSnap(ns,f,d){ns.write(f,JSON.stringify(d)+"\n","a");}
+
+async function _loadLibs(ns) {
+  const chk = p => ns.fileExists(p) ? import(p).catch(()=>null) : Promise.resolve(null);
+  const [t,m,e,p,l] = await Promise.all([chk("/lib/themes.js"),chk("/lib/market.js"),chk("/lib/estimate.js"),chk("/lib/portfolio.js"),chk("/lib/logging.js")]);
+  const missing=[!t&&"/lib/themes.js",!m&&"/lib/market.js",!e&&"/lib/estimate.js",!p&&"/lib/portfolio.js",!l&&"/lib/logging.js"].filter(Boolean);
+  if(missing.length)ns.tprint(`WARN: Missing libs — using fallbacks: ${missing.join(", ")}`);
+  return{
+    getTheme:t?.getTheme??_fbGetTheme, makeColors:t?.makeColors??_fbMakeColors,
+    tryBuyAccess:m?.tryBuyAccess??_fbTryBuyAccess, checkAccess:m?.checkAccess??_fbCheckAccess,
+    waitForTIX:m?.waitForTIX??_fbWaitForTIX,
+    estimateForecast:e?.estimateForecast??_fbEstFc, estimateVolatility:e?.estimateVolatility??_fbEstVol,
+    calcMomentum:e?.calcMomentum??_fbCalcMomentum,
+    totalWorth:p?.totalWorth??_fbTotalWorth, sparkline:p?.sparkline??_fbSparkline,
+    logTrade:l?.logTrade??_fbLogTrade, logSnapshot:l?.logSnapshot??_fbLogSnap,
+  };
+}
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -16,6 +42,9 @@ export async function main(ns) {
   // ╚══════════════════════════════════════════════════════════════╝
   ns.disableLog("ALL");
   ns.tail();
+  const { getTheme, makeColors, tryBuyAccess, checkAccess, waitForTIX,
+          estimateForecast, estimateVolatility, calcMomentum,
+          totalWorth, sparkline, logTrade, logSnapshot } = await _loadLibs(ns);
 
 
   // ═══════════════════════════════════════════════════════════════
@@ -118,6 +147,7 @@ export async function main(ns) {
       shortAvgPrice:    0,
       maxShares:        ns.stock.getMaxShares(sym),
       ticksSinceAction: 999,
+      positionOpenTick: 0,       // tick when current position was first opened (0 = flat)
     };
   }
 
@@ -219,19 +249,27 @@ export async function main(ns) {
       const f  = s.blendedForecast;
       const er = expectedReturn(s);
 
+      // Stale exit: position held > one full cycle with neutral signal → free capital
+      const stale = s.positionOpenTick > 0
+        && (tickCount - s.positionOpenTick) > 75
+        && Math.abs(f - 0.5) < 0.02;
+
       if (s.longShares > 0) {
-        if (f < cfg.forecastSellLong || er < cfg.sellThreshold || s.inversionFlag || s.momentum < -0.3) {
-          const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
-          ns.stock.sellStock(sym, s.longShares);
-          recordTrade(pnl);
-          recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
-          if (recentTrades.length > 10) recentTrades.shift();
-          s.ticksSinceAction = 0;
+        if (f < cfg.forecastSellLong || er < cfg.sellThreshold || s.inversionFlag || s.momentum < -0.3 || stale) {
+          try {
+            const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
+            ns.stock.sellStock(sym, s.longShares);
+            recordTrade(pnl);
+            recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
+            if (recentTrades.length > 10) recentTrades.shift();
+            s.ticksSinceAction = 0;
+            s.positionOpenTick = 0;
+          } catch { /* API unavailable or position already closed */ }
         }
       }
 
       if (s.shortShares > 0 && hasShorts) {
-        if (f > cfg.forecastSellShort || er > -cfg.sellThreshold || s.inversionFlag || s.momentum > 0.3) {
+        if (f > cfg.forecastSellShort || er > -cfg.sellThreshold || s.inversionFlag || s.momentum > 0.3 || stale) {
           try {
             const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
             ns.stock.sellShort(sym, s.shortShares);
@@ -239,6 +277,7 @@ export async function main(ns) {
             recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
             if (recentTrades.length > 10) recentTrades.shift();
             s.ticksSinceAction = 0;
+            s.positionOpenTick = 0;
           } catch { hasShorts = false; }
         }
       }
@@ -290,9 +329,12 @@ export async function main(ns) {
         if (shares > 0) {
           const cost = ns.stock.getPurchaseCost(r.sym, shares, "Long");
           if (cost <= avail) {
-            ns.stock.buyStock(r.sym, shares);
-            avail -= cost;
-            s.ticksSinceAction = 0;
+            const boughtAt = ns.stock.buyStock(r.sym, shares);
+            if (boughtAt > 0) {
+              avail -= cost;
+              s.ticksSinceAction = 0;
+              if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+            }
           }
         }
       }
@@ -303,9 +345,12 @@ export async function main(ns) {
           if (shares > 0) {
             const cost = ns.stock.getPurchaseCost(r.sym, shares, "Short");
             if (cost <= avail) {
-              ns.stock.buyShort(r.sym, shares);
-              avail -= cost;
-              s.ticksSinceAction = 0;
+              const boughtAt = ns.stock.buyShort(r.sym, shares);
+              if (boughtAt > 0) {
+                avail -= cost;
+                s.ticksSinceAction = 0;
+                if (s.positionOpenTick === 0) s.positionOpenTick = tickCount;
+              }
             }
           }
         } catch { hasShorts = false; }

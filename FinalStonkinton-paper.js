@@ -9,7 +9,10 @@ export async function main(ns) {
 
   const COMMISSION = 100000;
   const GRADUATE_TICKS = 200;
-  const GRADUATE_WIN_RATE = 0.55;
+  // +2% above raw 55% to compensate for bid/ask spread optimism in virtual P/L.
+  // Virtual sells use getBidPrice directly; real trades use getSaleGain() which
+  // accounts for the spread. Paper results are slightly better than real results.
+  const GRADUATE_WIN_RATE = 0.57;
   const TICK_HISTORY = 80;
 
   // Strategy variants to test in parallel

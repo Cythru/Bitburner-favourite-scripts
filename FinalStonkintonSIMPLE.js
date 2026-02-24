@@ -1,9 +1,31 @@
 // Usage: run FinalStonkintonSIMPLE.js [--liquidate] [--theme classic|neon|matrix|ocean|fire]
-import { getTheme, makeColors } from "/lib/themes.js";
-import { tryBuyAccess, checkAccess } from "/lib/market.js";
-import { estimateForecast, estimateVolatility } from "/lib/estimate.js";
-import { totalWorth, sparkline } from "/lib/portfolio.js";
-import { logTrade, logSnapshot } from "/lib/logging.js";
+// Lib files loaded dynamically — built-in fallbacks activate if any /lib/ file is absent.
+
+// ── Built-in fallbacks ──
+function _fbGetTheme(ns){const i=ns.args.indexOf("--theme");return{theme:null,name:i>=0?String(ns.args[i+1]||"classic"):"classic"};}
+function _fbMakeColors(){const id=s=>String(s);return{green:id,red:id,cyan:id,yellow:id,mag:id,dim:id,bold:id,pct:v=>(v>=0?"+":"")+(v*100).toFixed(1)+"%",plcol:(_,s)=>String(s)};}
+function _fbTryBuyAccess(ns){const m=ns.getServerMoneyAvailable("home");try{if(m>200e6)ns.stock.purchaseWseAccount();}catch{}try{if(m>5e9)ns.stock.purchaseTixApi();}catch{}try{if(m>1e9)ns.stock.purchase4SMarketData();}catch{}try{if(m>25e9)ns.stock.purchase4SMarketDataTixApi();}catch{}}
+function _fbCheckAccess(ns){let t=false,s=false;try{t=ns.stock.hasTIXAPIAccess();}catch{}try{s=ns.stock.has4SDataTIXAPI();}catch{}return{hasTIX:t,has4S:s};}
+function _fbEstFc(h,lW,sW,iD){const n=h.length;if(n<3)return{forecast:0.5,forecastShort:0.5,inversionFlag:false};const lL=Math.min(lW,n-1),sL=Math.min(sW,n-1),lS=n-lL,sS=n-sL;let lU=0,sU=0;for(let i=lS;i<n;i++){if(h[i]>h[i-1]){lU++;if(i>=sS)sU++;}}const f=lU/lL,fs=sU/sL,x=(f>0.5)!==(fs>0.5);return{forecast:f,forecastShort:fs,inversionFlag:x&&Math.abs(f-fs)>iD};}
+function _fbEstVol(h){const n=h.length;if(n<2)return 0.01;const w=Math.min(20,n-1),s=n-w;let sum=0;for(let i=s;i<n;i++)sum+=Math.abs(h[i]-h[i-1])/h[i-1];return sum/w;}
+function _fbTotalWorth(ns){let w=ns.getServerMoneyAvailable("home");try{for(const s of ns.stock.getSymbols()){const[l,,sh]=ns.stock.getPosition(s);if(l>0)w+=ns.stock.getSaleGain(s,l,"Long");if(sh>0)w+=ns.stock.getSaleGain(s,sh,"Short");}}catch{}return w;}
+function _fbSparkline(data,width=40){if(data.length<2)return"─".repeat(width);let mn=data[0],mx=data[0];for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}const r=mx-mn||1,B="▁▂▃▄▅▆▇█";let o="";for(let i=0;i<width;i++){const idx=Math.min(data.length-1,Math.floor(i*(data.length-1)/Math.max(1,width-1)));o+=B[Math.min(7,Math.floor((data[idx]-mn)/r*8))];}return o;}
+function _fbLogTrade(ns,f,t,x=""){ns.write(f,`[T${t.tick}] ${t.type} ${t.sym} P/L:${t.pnl>=0?"+":""}${Math.round(t.pnl)}${x}\n`,"a");}
+function _fbLogSnap(ns,f,d){ns.write(f,JSON.stringify(d)+"\n","a");}
+
+async function _loadLibs(ns) {
+  const chk = p => ns.fileExists(p) ? import(p).catch(()=>null) : Promise.resolve(null);
+  const [t,m,e,p,l] = await Promise.all([chk("/lib/themes.js"),chk("/lib/market.js"),chk("/lib/estimate.js"),chk("/lib/portfolio.js"),chk("/lib/logging.js")]);
+  const missing=[!t&&"/lib/themes.js",!m&&"/lib/market.js",!e&&"/lib/estimate.js",!p&&"/lib/portfolio.js",!l&&"/lib/logging.js"].filter(Boolean);
+  if(missing.length)ns.tprint(`WARN: Missing libs — using fallbacks: ${missing.join(", ")}`);
+  return{
+    getTheme:t?.getTheme??_fbGetTheme, makeColors:t?.makeColors??_fbMakeColors,
+    tryBuyAccess:m?.tryBuyAccess??_fbTryBuyAccess, checkAccess:m?.checkAccess??_fbCheckAccess,
+    estimateForecast:e?.estimateForecast??_fbEstFc, estimateVolatility:e?.estimateVolatility??_fbEstVol,
+    totalWorth:p?.totalWorth??_fbTotalWorth, sparkline:p?.sparkline??_fbSparkline,
+    logTrade:l?.logTrade??_fbLogTrade, logSnapshot:l?.logSnapshot??_fbLogSnap,
+  };
+}
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -14,6 +36,9 @@ export async function main(ns) {
   // ╚══════════════════════════════════════════════════════════╝
   ns.disableLog("ALL");
   ns.tail();
+  const { getTheme, makeColors, tryBuyAccess, checkAccess,
+          estimateForecast, estimateVolatility, totalWorth, sparkline,
+          logTrade, logSnapshot } = await _loadLibs(ns);
 
 
   // ═══════════════════════════════════════════════════════════
@@ -36,6 +61,11 @@ export async function main(ns) {
   const SHORT_WINDOW    = 10;
   const INVERSION_DELTA = 0.15;
 
+  const STALE_EXIT_TICKS   = 75;    // force-exit if position held this long with neutral signal
+  const STALE_NEUTRAL_BAND = 0.02;  // neutral = forecast within 0.02 of 0.5
+  const FLAT_ER_FLOOR      = 0.0003;// skip buy if max |ER| below this
+  const FLAT_SKIP_TICKS    = 3;     // consecutive flat ticks before skipping buy
+
   const { theme, name: THEME } = getTheme(ns);
   const C = makeColors(theme);
 
@@ -47,9 +77,11 @@ export async function main(ns) {
   let tickCount       = 0;
   let totalProfit     = 0;
   let totalTradeCount = 0;
+  let flatTicks       = 0;      // consecutive flat-market ticks
   const sessionStart  = Date.now();
   let hasShorts       = true;
   let has4S           = false;
+  const positionOpenTick = {}; // sym → tick when position first opened (0 = flat)
 
   const history      = {};
   const stockData    = {};
@@ -274,21 +306,28 @@ export async function main(ns) {
       const [ls, lap, ss, sap] = ns.stock.getPosition(sym);
       const f   = getForecast(sym);
       const inv = getInversion(sym);
+      const stale = (positionOpenTick[sym] || 0) > 0
+        && (tickCount - positionOpenTick[sym]) > STALE_EXIT_TICKS
+        && Math.abs(f - 0.5) < STALE_NEUTRAL_BAND;
 
-      if (ls > 0 && (f < SELL_LONG || inv)) {
-        const pnl = ns.stock.getSaleGain(sym, ls, "Long") - ls * lap;
-        totalProfit += pnl;
-        ns.stock.sellStock(sym, ls);
-        recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
-        if (recentTrades.length > 5) recentTrades.shift();
-        totalTradeCount++;
+      if (ls > 0 && (f < SELL_LONG || inv || stale)) {
+        try {
+          const pnl = ns.stock.getSaleGain(sym, ls, "Long") - ls * lap;
+          totalProfit += pnl;
+          ns.stock.sellStock(sym, ls);
+          positionOpenTick[sym] = 0;
+          recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
+          if (recentTrades.length > 5) recentTrades.shift();
+          totalTradeCount++;
+        } catch { /* position already gone or API unavailable */ }
       }
 
-      if (ss > 0 && hasShorts && (f > SELL_SHORT || inv)) {
+      if (ss > 0 && hasShorts && (f > SELL_SHORT || inv || stale)) {
         try {
           const pnl = ns.stock.getSaleGain(sym, ss, "Short") - ss * sap;
           totalProfit += pnl;
           ns.stock.sellShort(sym, ss);
+          positionOpenTick[sym] = 0;
           recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
           if (recentTrades.length > 5) recentTrades.shift();
           totalTradeCount++;
@@ -296,7 +335,14 @@ export async function main(ns) {
       }
     }
 
-    // ── BUY ──
+    // ── BUY ── (flat market short-circuit)
+    const maxER = symbols.reduce((mx, sym) => {
+      const f = getForecast(sym), v = getVolatility(sym);
+      return Math.max(mx, Math.abs(v * (f - 0.5)));
+    }, 0);
+    if (maxER < FLAT_ER_FLOOR) { if (++flatTicks >= FLAT_SKIP_TICKS) { printDash(); continue; } }
+    else flatTicks = 0;
+
     const cash     = ns.getServerMoneyAvailable("home") - RESERVE_CASH;
     const invested = tw - ns.getServerMoneyAvailable("home");
     const canSpend = Math.min(cash, tw * MAX_DEPLOY - invested);
@@ -327,7 +373,13 @@ export async function main(ns) {
           const shares = Math.min(Math.floor((spend - COMMISSION) / price), maxShares[sym] - ls);
           if (shares > 0) {
             const cost = ns.stock.getPurchaseCost(sym, shares, "Long");
-            if (cost <= avail) { ns.stock.buyStock(sym, shares); avail -= cost; }
+            if (cost <= avail) {
+              const boughtAt = ns.stock.buyStock(sym, shares);
+              if (boughtAt > 0) {
+                avail -= cost;
+                if (!positionOpenTick[sym]) positionOpenTick[sym] = tickCount;
+              }
+            }
           }
         }
         else if (f < BUY_SHORT && hasShorts) {
@@ -336,7 +388,13 @@ export async function main(ns) {
             const shares = Math.min(Math.floor((spend - COMMISSION) / price), maxShares[sym] - ss);
             if (shares > 0) {
               const cost = ns.stock.getPurchaseCost(sym, shares, "Short");
-              if (cost <= avail) { ns.stock.buyShort(sym, shares); avail -= cost; }
+              if (cost <= avail) {
+                const boughtAt = ns.stock.buyShort(sym, shares);
+                if (boughtAt > 0) {
+                  avail -= cost;
+                  if (!positionOpenTick[sym]) positionOpenTick[sym] = tickCount;
+                }
+              }
             }
           } catch { hasShorts = false; }
         }

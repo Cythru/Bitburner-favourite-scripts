@@ -16,3 +16,6 @@ LICENSES.chromium.html
 # Game asset directories
 locales/
 resources/
+
+# Build artifacts
+rust_out

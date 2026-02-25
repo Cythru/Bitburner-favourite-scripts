@@ -113,13 +113,22 @@ export async function main(ns) {
 
   ns.print("  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
   ns.print("");
-  ns.print("  The rebellion crested at the high ridge.");
-  ns.print("  Both sides had already lost more than they came with.");
-  ns.print("  The smoke had stopped meaning anything.");
+  ns.print("  The rebellion crested the moment the teleporter room fell.");
+  ns.print("  CLASSIFIED. TIER ZERO. BIOMETRIC SEAL.");
+  ns.print("  The most secure room in the building — possibly the world.");
+  ns.print("  Both sides had fought through everything to reach it.");
+  ns.print("  Whoever held it held the thread.");
   ns.print("");
   await ns.sleep(1400);
+  ns.print("  The blast doors had taken four minutes to breach.");
+  ns.print("  The air inside still smelled of ozone and burnt clearance cards.");
+  ns.print("  The teleporter hummed at the centre of the room — active,");
+  ns.print("  destination locked, coordinates he didn't recognise.");
+  ns.print("");
+  await ns.sleep(1600);
   ns.print("  He found her there.");
-  ns.print("  His little sister. Standing on the other side of it.");
+  ns.print("  His little sister. Standing at the console.");
+  ns.print("  She had beaten him here by minutes. Maybe less.");
   ns.print("  He had known, somehow, that it would be her.");
   ns.print("");
   await ns.sleep(1600);
@@ -179,7 +188,7 @@ export async function main(ns) {
   ns.print("  Her hand tightened again.");
   ns.print("");
   await ns.sleep(900);
-  ns.print("  The wind came through. Both of them felt it.");
+  ns.print("  The teleporter hummed. The coordinates blinked, waiting.");
   ns.print("");
   await ns.sleep(1100);
   ns.print("  Then her grip loosened.");
@@ -217,8 +226,8 @@ export async function main(ns) {
   ns.print("  Neither could she.");
   ns.print("");
   await ns.sleep(2000);
-  ns.print("  She did not go back down the other side.");
-  ns.print("  She left the ridge entirely.");
+  ns.print("  She did not use the teleporter.");
+  ns.print("  She walked to the blast door and left through it.");
   ns.print("  A third direction. One that hadn't existed before he spoke.");
   ns.print("");
   await ns.sleep(1600);

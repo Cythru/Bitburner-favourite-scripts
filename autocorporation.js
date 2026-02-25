@@ -50,13 +50,13 @@ export async function main(ns) {
 
     // Initial setup: first div Tobacco
     if (corp.divisions.length === 0) {
-        ns.corporation.expandIndustry(corp.name, "Tobacco");
+        ns.corporation.expandIndustry("Tobacco", "Tobacco");
         corp = ns.corporation.getCorporation();
     }
 
     // Expand to Pharma if not
     if (corp.divisions.length === 1) {
-        ns.corporation.expandIndustry(corp.name, "Pharmaceutical");
+        ns.corporation.expandIndustry("Pharmaceutical", "Pharmaceutical");
     }
 
     while (true) {
@@ -96,12 +96,13 @@ async function manageDivision(ns, div, cities, productCity, upgrades, researches
 
         // Hire till full
         let office = ns.corporation.getOffice(div.name, city);
-        while (office.employees.length < office.maxSize) {
+        while (office.numEmployees < office.size) {
             if (!ns.corporation.hireEmployee(div.name, city)) break;
+            office = ns.corporation.getOffice(div.name, city);  // refresh count
         }
 
         // Set jobs: simple split - ops/eng heavy for prod, rest R&D/mgmt
-        let numEmp = office.employees.length;
+        let numEmp = office.numEmployees;
         let ops  = Math.floor(numEmp * 0.4);
         let eng  = Math.floor(numEmp * 0.4);
         let mgmt = Math.floor(numEmp * 0.1);
@@ -123,8 +124,15 @@ async function manageDivision(ns, div, cities, productCity, upgrades, researches
         }
     }
 
-    // Warehouses - upgrade when almost full
+    // Warehouses - buy if missing, upgrade when almost full
     for (let city of cities) {
+        if (!ns.corporation.hasWarehouse(div.name, city)) {
+            const whCost = ns.corporation.getPurchaseWarehouseCost();
+            if (whCost < ns.corporation.getCorporation().funds * 0.05) {
+                ns.corporation.purchaseWarehouse(div.name, city);
+            }
+            continue;  // can't use it until next cycle
+        }
         let wh = ns.corporation.getWarehouse(div.name, city);
         if (wh.sizeUsed / wh.size > 0.95) {
             let cost = ns.corporation.getUpgradeWarehouseCost(div.name, city);
@@ -137,20 +145,24 @@ async function manageDivision(ns, div, cities, productCity, upgrades, researches
     // Buy materials - keep stocks high for prod (safer version)
     const matNames = ["Food", "Energy", "Water", "Plants", "Hardware", "Robots", "AI Cores", "RealEstate"];
     for (let city of cities) {
+        if (!ns.corporation.hasWarehouse(div.name, city)) continue;
         let wh = ns.corporation.getWarehouse(div.name, city);
         let funds = ns.corporation.getCorporation().funds;
 
         for (let mat of matNames) {
             let info = ns.corporation.getMaterial(div.name, city, mat);
-            let stock = info.qty;
+            let stock = info.stored;  // v2 API: field is "stored" not "qty"
             let spaceLeft = wh.size - wh.sizeUsed;
 
             // Buy at most 10% of remaining space or 100 million units (safe cap)
             let buyAmt = Math.min(Math.floor(spaceLeft * 0.1), 100e6);
             let estCost = buyAmt * info.marketPrice * 1.1; // rough +10% buffer
 
+            // buyMaterial sets a per-tick rate — must reset to 0 when done or it buys forever
             if (stock < wh.size * 0.5 && buyAmt > 0 && estCost < funds * 0.05) {
                 ns.corporation.buyMaterial(div.name, city, mat, buyAmt);
+            } else {
+                ns.corporation.buyMaterial(div.name, city, mat, 0);
             }
         }
     }
@@ -158,7 +170,9 @@ async function manageDivision(ns, div, cities, productCity, upgrades, researches
     // Make products - up to 3, high rating
     if (div.products.length < 3) {
         let prodName = `LazyProd${div.products.length + 1}`;
-        ns.corporation.makeProduct(div.name, productCity, prodName, "MAX", 10);
+        const funds = ns.corporation.getCorporation().funds;
+        const invest = Math.max(1e9, funds * 0.01);  // at least $1b, up to 1% of funds
+        ns.corporation.makeProduct(div.name, productCity, prodName, invest, invest);
     }
 
     // Sell all products MAX MP, export
@@ -215,10 +229,13 @@ function manageGlobal(ns, upgrades) {
         }
     }
 
-    // AdVert if affordable
-    let advertCost = ns.corporation.getHireAdVertCost(corp.name);
-    if (advertCost * 4 < funds) {
-        ns.corporation.hireAdVert(corp.name);
+    // AdVert if affordable — hireAdVert takes a division name, not corp name
+    for (const div of corp.divisions) {
+        let advertCost = ns.corporation.getHireAdVertCost(div.name);
+        if (advertCost * 4 < funds) {
+            ns.corporation.hireAdVert(div.name);
+            funds = ns.corporation.getCorporation().funds;
+        }
     }
 
     // Go public if ready (after some products)

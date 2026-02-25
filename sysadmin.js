@@ -123,8 +123,9 @@ export async function main(ns) {
         const maxRam = pservs.reduce((m, s) => Math.max(m, ns.getServerMaxRam(s)), 0);
         const next = Math.min(maxRam * 2, cfg.maxPurchasedRam);
         if (next > maxRam) {
-          const costPer = ns.getPurchasedServerUpgradeCost(pservs[0], next);
-          const totalCost = costPer * pservs.length;
+          const totalCost = pservs.reduce((sum, s) => {
+            try { return sum + ns.getPurchasedServerUpgradeCost(s, next); } catch { return sum; }
+          }, 0);
           if (totalCost > 0 && totalCost < money * 0.5) {
             if (!DRY) for (const s of pservs) ns.upgradePurchasedServer(s, next);
             actions.push(`farm servers → ${ns.formatRam(next)}`);
@@ -255,9 +256,10 @@ export async function main(ns) {
     }
 
     // Remove orphan script files from home that aren't running anywhere
-    // and aren't in the keep list.
+    // and aren't in the keep list. Never touch /lib/ — those are imported
+    // dynamically and won't show up as running processes.
     try {
-      const homeFiles = ns.ls("home", ".js").filter(f => !KEEP.has(f));
+      const homeFiles = ns.ls("home", ".js").filter(f => !KEEP.has(f) && !f.startsWith("/lib/"));
       for (const file of homeFiles) {
         // Check if it's running on any server
         let isRunning = false;
@@ -282,8 +284,7 @@ export async function main(ns) {
     const result = { available: [], tiers: [] };
     try {
       // Requires SF4 — will throw if not unlocked
-      const factions = ns.singularity.getOwnedAugmentations(false);
-      const owned    = new Set(ns.singularity.getOwnedAugmentations(true));
+      const owned = new Set(ns.singularity.getOwnedAugmentations(true));
       const money    = ns.getServerMoneyAvailable("home");
 
       const allAugs = [];

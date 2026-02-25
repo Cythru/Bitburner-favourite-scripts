@@ -313,8 +313,8 @@ export async function main(ns) {
       if (ls > 0 && (f < SELL_LONG || inv || stale)) {
         try {
           const pnl = ns.stock.getSaleGain(sym, ls, "Long") - ls * lap;
-          totalProfit += pnl;
           ns.stock.sellStock(sym, ls);
+          totalProfit += pnl;  // after sell — avoids double-count if sell throws
           positionOpenTick[sym] = 0;
           recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
           if (recentTrades.length > 5) recentTrades.shift();
@@ -325,8 +325,8 @@ export async function main(ns) {
       if (ss > 0 && hasShorts && (f > SELL_SHORT || inv || stale)) {
         try {
           const pnl = ns.stock.getSaleGain(sym, ss, "Short") - ss * sap;
-          totalProfit += pnl;
           ns.stock.sellShort(sym, ss);
+          totalProfit += pnl;  // after sell — avoids double-count if sell throws
           positionOpenTick[sym] = 0;
           recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
           if (recentTrades.length > 5) recentTrades.shift();

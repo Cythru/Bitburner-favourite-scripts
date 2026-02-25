@@ -18,7 +18,13 @@ export async function main(ns) {
   if (ns.fileExists(provenFile)) {
     try {
       const raw = ns.read(provenFile);
-      if (raw && raw.length > 2) proven = JSON.parse(raw);
+      if (raw && raw.length > 2) {
+        const parsed = JSON.parse(raw);
+        // Validate it's an array — malformed/old format could be object or null,
+        // which would throw an uncaught TypeError on proven.sort() below
+        proven = Array.isArray(parsed) ? parsed : [];
+        if (!Array.isArray(parsed)) ns.tprint("WARN: proven.txt is not an array — skipping");
+      }
     } catch { ns.tprint("WARN: Could not parse proven.txt"); }
   }
 

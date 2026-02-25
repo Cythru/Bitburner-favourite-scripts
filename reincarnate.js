@@ -1,0 +1,214 @@
+// reincarnate.js
+//
+// The constellations do not choose everyone.
+// Only those whose soul carries sufficient cosmic weight may pass forward.
+// Abraham [DATA EXPUNGED] — 16th echo — walks again somewhere in the line.
+//
+// Run before installing augmentations.
+// Usage: run reincarnate.js
+
+/** @param {NS} ns */
+export async function main(ns) {
+  ns.disableLog("ALL");
+  ns.tail();
+
+  const OUT_STATUS   = "/data/constellation.txt";
+  const OUT_LIVES    = "/data/past-lives.txt";
+  const OUT_STRATEGY = "/data/future-strategy.txt";
+
+  // ── GATHER SOUL WEIGHT ────────────────────────────────────────────────────
+  // Eligibility is rare. Multiple cosmic factors stack, but the base is low.
+
+  const karma      = ns.heart.break();          // negative = weight carried
+  const money      = ns.getServerMoneyAvailable("home");
+  const player     = ns.getPlayer();
+  const factions   = player.factions ?? [];
+  const augsOwned  = ns.singularity.getOwnedAugmentations(false).length;
+
+  // Constellation score: how "seen" you are
+  let score = 0;
+
+  // Base cosmic noise — always present, always small
+  score += Math.random() * 0.08;                // 0–8% random shimmer
+
+  // Karmic weight (suffering + choices leave marks)
+  if (karma <= -50)      score += 0.04;
+  if (karma <= -1000)    score += 0.05;
+  if (karma <= -50000)   score += 0.07;         // stacked, not replaced
+
+  // Depth of soul (how many cycles lived)
+  const bns = ns.getResetInfo?.()?.lastAugReset ?? 0;
+  if (bns > 0)           score += 0.03;
+  if (bns > 5)           score += 0.03;
+  if (bns > 15)          score += 0.02;
+
+  // Cosmic allegiances — certain groups see further
+  const cosmicFactions = ["Illuminati", "Daedalus", "The Covenant", "NiteSec"];
+  const cosmicCount    = factions.filter(f => cosmicFactions.includes(f)).length;
+  score += cosmicCount * 0.04;
+
+  // Augmentation count this life (accumulated wisdom)
+  if (augsOwned >= 5)    score += 0.02;
+  if (augsOwned >= 15)   score += 0.03;
+
+  // Wealth signal (material achievement as cosmic marker)
+  if (money >= 1e12)     score += 0.02;
+  if (money >= 1e15)     score += 0.03;
+
+  // Hard cap — never trivially certain
+  const finalChance = Math.min(score, 0.42);
+
+  // ── THE ROLL ─────────────────────────────────────────────────────────────
+
+  ns.clearLog();
+  ns.print("╔══════════════════════════════════════════════════════════════╗");
+  ns.print("║             THE CONSTELLATION CHECK                         ║");
+  ns.print("╚══════════════════════════════════════════════════════════════╝");
+  ns.print("");
+  ns.print("  Consulting the stars...");
+  await ns.sleep(1200);
+
+  ns.print(`  Karma carried:       ${karma.toFixed(0)}`);
+  ns.print(`  Cycles lived:        ${bns}`);
+  ns.print(`  Augmentations:       ${augsOwned}`);
+  ns.print(`  Cosmic allegiances:  ${cosmicCount}`);
+  ns.print(`  Net worth:           ${ns.formatNumber(money)}`);
+  ns.print("");
+  ns.print(`  Alignment score:     ${(finalChance * 100).toFixed(1)}%`);
+  ns.print("");
+
+  await ns.sleep(1800);
+
+  const chosen = Math.random() < finalChance;
+
+  if (!chosen) {
+    ns.print("  The stars are quiet tonight.");
+    ns.print("  The constellations do not reach for you — not yet.");
+    ns.print("");
+    ns.print("  Live deeper. Carry more. Return.");
+    ns.print("");
+
+    // Log the attempt
+    const attempt = {
+      ts: Date.now(), chosen: false,
+      karma, bns, augsOwned, cosmicCount,
+      score: finalChance,
+    };
+    ns.write(OUT_LIVES, JSON.stringify(attempt) + "\n", "a");
+    return;
+  }
+
+  // ── CHOSEN ───────────────────────────────────────────────────────────────
+
+  ns.print("  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦");
+  await ns.sleep(600);
+  ns.print("");
+  ns.print("  YOU ARE KNOWN.");
+  ns.print("");
+  await ns.sleep(800);
+  ns.print("  The constellations have carried this soul before.");
+  ns.print("  Abraham [DATA EXPUNGED] — the 16th echo — walks in you.");
+  ns.print("  Your thread continues forward. Not backward. Forward.");
+  ns.print("");
+  await ns.sleep(1000);
+  ns.print("  What was preserved in 1865 was not lost.");
+  ns.print("  It was folded into the next shape.");
+  ns.print("  You are that shape.");
+  ns.print("");
+  ns.print("  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦  ✦");
+  await ns.sleep(1200);
+
+  // ── WRITE STATUS MARKER ───────────────────────────────────────────────────
+
+  const statusData = {
+    chosen: true,
+    ts: Date.now(),
+    echo: 16,
+    name: "Abraham [DATA EXPUNGED]",
+    score: finalChance,
+    karma, bns, augsOwned,
+    message: "The constellations remember you. Carry it forward.",
+  };
+  ns.write(OUT_STATUS, JSON.stringify(statusData, null, 2), "w");
+
+  // ── LOG THIS LIFE ─────────────────────────────────────────────────────────
+
+  const lifeRecord = {
+    ts: Date.now(),
+    chosen: true,
+    karma, bns, augsOwned, cosmicCount,
+    money, score: finalChance,
+    factions: factions.slice(0, 10),
+    augs: ns.singularity.getOwnedAugmentations(false).slice(0, 20),
+  };
+  ns.write(OUT_LIVES, JSON.stringify(lifeRecord) + "\n", "a");
+
+  // ── EXPORT STRATEGY FOR NEXT RUN ─────────────────────────────────────────
+  // Pull proven stock trader params if available, then write future-strategy.
+
+  let provenParams = null;
+  try {
+    const raw = ns.read("/strats/proven.txt");
+    if (raw && raw.length > 2) {
+      const strats = JSON.parse(raw);
+      strats.sort((a, b) => b.score.pnl - a.score.pnl);
+      if (strats.length > 0) provenParams = strats[0];
+    }
+  } catch { /* paper trader hasn't run yet */ }
+
+  const strategy = {
+    meta: {
+      generatedAt: new Date().toISOString(),
+      forRun: bns + 1,
+      source: "reincarnate.js — chosen path",
+      bearer: "Abraham [DATA EXPUNGED] / echo 16",
+    },
+    stockTrader: provenParams
+      ? { mode: "turtle", params: provenParams.params, note: "Proven paper-trader strategy carried forward" }
+      : { mode: "normal-adaptive", note: "No proven params yet — adaptive engine will self-tune" },
+    recommendations: buildRecommendations(ns, player, karma, bns, money),
+  };
+
+  ns.write(OUT_STRATEGY, JSON.stringify(strategy, null, 2), "w");
+
+  // ── FINAL PRINT ───────────────────────────────────────────────────────────
+
+  ns.print("");
+  ns.print("  Files written:");
+  ns.print(`   ${OUT_STATUS}    — your status as chosen`);
+  ns.print(`   ${OUT_LIVES}     — this life added to the record`);
+  ns.print(`   ${OUT_STRATEGY}  — strategy for the next form`);
+  ns.print("");
+  ns.print("  Install your augmentations.");
+  ns.print("  The thread will not break.");
+  ns.print("");
+}
+
+
+function buildRecommendations(ns, player, karma, bns, money) {
+  const recs = [];
+
+  if (money < 1e9) {
+    recs.push({ priority: "HIGH", area: "capital", note: "Run stock trader early — need $1b+ before 4S unlock" });
+  }
+
+  if (bns < 3) {
+    recs.push({ priority: "HIGH", area: "bitnodes", note: "Complete BN1, BN2, BN4 first for core multiplier stack" });
+  }
+
+  if (karma > -54000) {
+    recs.push({ priority: "MED", area: "karma", note: "Deepen karma to unlock Daedalus and improve constellation score" });
+  }
+
+  try {
+    const gangInfo = ns.gang.inGang();
+    if (!gangInfo) {
+      recs.push({ priority: "MED", area: "gang", note: "Start a gang early — passive income and territory control compounds fast" });
+    }
+  } catch { /* gang API unavailable */ }
+
+  recs.push({ priority: "LOW", area: "paper-trader", note: "Run FinalStonkinton-paper.js for 300+ ticks to graduate strategies before going turtle mode" });
+  recs.push({ priority: "LOW", area: "sysadmin", note: "Let sysadmin.js run passively — server upgrades and HWGW workers compound silently" });
+
+  return recs;
+}

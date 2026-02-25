@@ -745,10 +745,25 @@ export async function main(ns) {
     if (TURTLE) { modeStr = "TURTLE UP";          modeColor = C.green; }
     if (YOLO)   { modeStr = "GO BIG OR GO HOME";  modeColor = C.mag; }
 
+    // ── Trend velocity (comparing recent vs older portion of sparkline) ──
+    let velocityStr = "";
+    if (worthHistory.length >= 10) {
+      const half = Math.floor(worthHistory.length / 2);
+      const oldSlope = (worthHistory[half] - worthHistory[0]) / half;
+      const newSlope = (worthHistory[worthHistory.length - 1] - worthHistory[half]) / half;
+      if (newSlope > oldSlope * 1.5 && newSlope > 0)      velocityStr = C.green(" ↑↑ accel");
+      else if (newSlope > 0 && oldSlope >= 0)             velocityStr = C.green(" ↑  steady");
+      else if (newSlope < oldSlope * 1.5 && newSlope < 0) velocityStr = C.red(" ↓↓ accel");
+      else if (newSlope < 0)                              velocityStr = C.red(" ↓  steady");
+      else                                               velocityStr = C.dim(" → flat");
+    }
+
     // ── Header ──
-    ns.print("╔══════════════════════════════════════════════════════════════╗");
-    ns.print(`║  ${C.bold("FINAL STONKINTON")}  ${modeColor("[ " + modeStr + " ]")}`);
-    ns.print("╠══════════════════════════════════════════════════════════════╣");
+    const LINE = "═".repeat(62);
+    ns.print(`╔${LINE}╗`);
+    const modeLabel = `  FINAL STONKINTON  [ ${modeStr} ]`;
+    ns.print(`║${C.bold("  FINAL STONKINTON")}  ${modeColor("[ " + modeStr + " ]")}`);
+    ns.print(`╠${LINE}╣`);
     ns.print(`║ ${has4S ? C.green("4S DATA") : C.yellow("ESTIMATED")} | Shorts: ${hasShorts ? C.green("ON") : C.red("OFF")} | Tick: ${C.cyan(String(tickCount))} | ${elapsed}min | ${C.dim(THEME)}`);
 
     // Show proven strategy info in turtle mode (so you know which params loaded)
@@ -757,17 +772,18 @@ export async function main(ns) {
     }
 
     // ── Portfolio summary ──
-    ns.print("╠══════════════════════════════════════════════════════════════╣");
-    ns.print(`║ Net Worth:  ${C.bold(ns.formatNumber(tw, 2).padStart(14))}  ${C.pct(ret)}`);
-    ns.print(`║ Cash:       ${ns.formatNumber(cash, 2).padStart(14)}`);
-    ns.print(`║ Invested:   ${ns.formatNumber(invested, 2).padStart(14)}  ${C.dim("(" + (tw > 0 ? (invested / tw * 100).toFixed(1) : "0") + "% deployed)")}`);
+    ns.print(`╠${LINE}╣`);
+    ns.print(`║ Net Worth:  ${C.bold(ns.formatNumber(tw, 2).padStart(14))}  ${C.pct(ret)}${velocityStr}`);
+    ns.print(`║ Cash:       ${ns.formatNumber(cash, 2).padStart(14)}  ${C.dim("Invested: " + (tw > 0 ? (invested / tw * 100).toFixed(1) : "0") + "%")}`);
     ns.print(`║ Session P/L:${C.plcol(totalProfit, ns.formatNumber(totalProfit, 2).padStart(14))}`);
-    ns.print(`║  /min: ${C.plcol(ppm, ns.formatNumber(ppm, 2))}  /hr: ${C.plcol(pph, ns.formatNumber(pph, 2))}  /24hr: ${C.plcol(pp24, ns.formatNumber(pp24, 2))}`);
+    ns.print(`║  /min: ${C.plcol(ppm, ns.formatNumber(ppm, 2).padStart(10))}  /hr: ${C.plcol(pph, ns.formatNumber(pph, 2).padStart(11))}  /24h: ${C.plcol(pp24, ns.formatNumber(pp24, 2))}`);
 
     // ── Net worth sparkline (mini graph using Unicode block chars) ──
     if (worthHistory.length > 2) {
-      const color = worthHistory[worthHistory.length - 1] >= worthHistory[0] ? C.green : C.red;
-      ns.print(`║ ${color(sparkline(worthHistory, 40))}`);
+      const trending = worthHistory[worthHistory.length - 1] >= worthHistory[0];
+      const color    = trending ? C.green : C.red;
+      const arrow    = trending ? "▲" : "▼";
+      ns.print(`║ ${C.dim("NW")} ${color(arrow)} ${color(sparkline(worthHistory, 44))} ${C.dim(worthHistory.length + "T")}`);
     }
 
     // ── YOLO scoreboard (only shown in YOLO mode) ──
@@ -850,13 +866,17 @@ export async function main(ns) {
         .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))
         .slice(0, 5);
       if (opps.length > 0) {
-        ns.print(C.dim(" Top Opportunities:"));
+        ns.print(`╠${LINE}╣`);
+        ns.print(`║ ${C.cyan("RADAR")}  — top unpositioned signals:`);
         for (const o of opps) {
-          const dir = o.f > 0.5 ? C.green("LONG ") : C.red("SHORT");
-          ns.print(`   ${dir} ${o.sym.padEnd(5)} Fcst: ${o.f.toFixed(3)} ER: ${o.er.toFixed(5)}`);
+          const dir    = o.f > 0.5 ? C.green("▲ LONG ") : C.red("▼ SHORT");
+          const bar    = "█".repeat(Math.round(Math.abs(o.er) * 5000)).padEnd(8, "░");
+          const erCol  = o.er > 0 ? C.green(o.er.toFixed(5)) : C.red(o.er.toFixed(5));
+          ns.print(`║  ${dir} ${o.sym.padEnd(5)}  F:${o.f.toFixed(3)}  ER:${erCol}  ${C.dim(bar)}`);
         }
       }
     }
+    ns.print(`╚${LINE}╝`);
   }
 
 

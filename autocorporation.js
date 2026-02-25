@@ -1,13 +1,175 @@
-/** @param {NS} ns 
- * LazyCorp.js - Autocorp for Bitburner (v1.1 - fixed cost msg + bug fixes)
+/** @param {NS} ns
+ * LazyCorp.js - Autocorp for Bitburner (v1.2 - dashboard display)
  * By a lazy dev who grinded anyway.
  * Starts corp, expands, hires, produces, upgrades. Runs forever.
  * Run on home: run LazyCorp.js
  * Profits? Yeah, eventually. Need $150b to start.
 **/
 
+// ─── CORP DASHBOARD ────────────────────────────────────────────────
+// Called at the top of every main loop iteration. Prints a compact
+// snapshot of the corporation state to the tail window.
+//
+// Box width is 68 columns (66 inner + 2 border chars).
+function printCorpDashboard(ns) {
+    const W = 66; // inner width
+    const R = "\x1b[0m";
+    const cyan   = (s) => "\x1b[36m"  + s + R;
+    const green  = (s) => "\x1b[32m"  + s + R;
+    const yellow = (s) => "\x1b[33m"  + s + R;
+    const red    = (s) => "\x1b[31m"  + s + R;
+    const bold   = (s) => "\x1b[1m"   + s + R;
+    const dim    = (s) => "\x1b[2m"   + s + R;
+    const mag    = (s) => "\x1b[35m"  + s + R;
+
+    // Format helpers (no ns.nFormat dependency — plain math)
+    function fm(n) {
+        if (!isFinite(n)) return "?";
+        const abs = Math.abs(n), sign = n < 0 ? "-$" : "$";
+        if (abs >= 1e15) return sign + (abs/1e15).toFixed(2) + "q";
+        if (abs >= 1e12) return sign + (abs/1e12).toFixed(2) + "t";
+        if (abs >= 1e9)  return sign + (abs/1e9).toFixed(2) + "b";
+        if (abs >= 1e6)  return sign + (abs/1e6).toFixed(2) + "m";
+        if (abs >= 1e3)  return sign + (abs/1e3).toFixed(2) + "k";
+        return sign + abs.toFixed(0);
+    }
+
+    // Pad a raw string (no ANSI inside!) to exactly n chars
+    function p(s, n) {
+        s = String(s);
+        return s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
+    }
+
+    // Pad an ANSI-wrapped string: measure visible length, then right-pad
+    function pa(s, n) {
+        const vis = s.replace(/\x1b\[[0-9;]*m/g, "");
+        const extra = n - vis.length;
+        return extra > 0 ? s + " ".repeat(extra) : s;
+    }
+
+    // Horizontal rules
+    const top  = cyan("\u2554" + "\u2550".repeat(W) + "\u2557");
+    const mid  = cyan("\u2560" + "\u2550".repeat(W) + "\u2563");
+    const bot  = cyan("\u255a" + "\u2550".repeat(W) + "\u255d");
+    const row  = (content) => cyan("\u2551") + pa(content, W) + cyan("\u2551");
+
+    // ── Gather data (safe) ──────────────────────────────────────────
+    let corpName = "LazyCorp", revenue = 0, expenses = 0, cash = 0;
+    let fundingRound = 0, isPublic = false, divData = [];
+    let lastUpgrades = [];
+
+    try {
+        const corp = ns.corporation.getCorporation();
+        corpName     = corp.name;
+        revenue      = corp.revenue;
+        expenses     = corp.expenses;
+        cash         = corp.funds;
+        fundingRound = corp.fundingRound ?? 0;
+        isPublic     = corp.public ?? false;
+
+        for (const divName of corp.divisions) {
+            try {
+                const div = ns.corporation.getDivision(divName);
+                let totalEmp = 0, totalProd = 0;
+                const cities = ["Aevum", "Chongqing", "Sector-12", "New Tokyo", "Ishima", "Volkov"];
+                for (const city of cities) {
+                    try {
+                        const off = ns.corporation.getOffice(divName, city);
+                        totalEmp += off.numEmployees;
+                    } catch (_) {}
+                }
+                // Product tier = number of completed products
+                const productCount = (div.products || []).length;
+                const divRevenue   = div.lastCycleRevenue ?? 0;
+                divData.push({
+                    name: divName,
+                    revenue: divRevenue,
+                    employees: totalEmp,
+                    products: productCount,
+                    research: div.researchPoints ?? 0,
+                    type: div.type ?? "?",
+                });
+            } catch (_) {}
+        }
+
+        // What upgrades are currently being bought (cheapest in queue)
+        const upgrades = [
+            "Smart Supply Chain", "DreamSense", "Wilson Analytics",
+            "Nuoptimal Neurotuning", "Philips Medical", "FTC Rumors",
+            "Big Chip", "Neural Networking", "Overclock", "Stiction", "Project Insight"
+        ];
+        for (const upg of upgrades) {
+            try {
+                const lvl  = ns.corporation.getUpgradeLevel(upg);
+                const cost = ns.corporation.getUpgradeLevelCost(upg, lvl + 1);
+                if (cost < cash * 0.02) lastUpgrades.push(upg + " → " + (lvl + 1));
+                if (lastUpgrades.length >= 3) break;
+            } catch (_) {}
+        }
+    } catch (_) {}
+
+    const profit = revenue - expenses;
+
+    // ── Render ──────────────────────────────────────────────────────
+    const ts       = new Date().toLocaleTimeString();
+    const titleStr = " LAZYCORP DASHBOARD  " + ts;
+    const titlePad = Math.max(0, Math.floor((W - titleStr.length) / 2));
+    ns.print(top);
+    ns.print(row(" ".repeat(titlePad) + bold(mag(titleStr))));
+    ns.print(mid);
+
+    // Overview row
+    const pubStr    = isPublic ? green("PUBLIC") : yellow("PRIVATE");
+    const roundStr  = fundingRound > 0 ? "  Round " + fundingRound : "  No funding";
+    const overStr   = " " + bold(cyan(p(corpName, 14))) + pubStr + dim(roundStr);
+    ns.print(row(overStr));
+
+    // Financials
+    const revStr  = " Revenue:  " + green(fm(revenue) + "/s");
+    const profStr = "   Profit: " + (profit >= 0 ? green(fm(profit) + "/s") : red(fm(profit) + "/s"));
+    const cashStr = "   Cash:   " + yellow(fm(cash));
+    ns.print(row(revStr + profStr + cashStr));
+
+    // Blank separator
+    ns.print(mid);
+
+    // Divisions header
+    ns.print(row(" " + bold(" Division          Type         Rev/s       Emp   Products")));
+    ns.print(row(dim(" " + "\u2500".repeat(W - 1))));
+
+    if (divData.length === 0) {
+        ns.print(row("  " + dim("No divisions yet.")));
+    } else {
+        for (const d of divData) {
+            // Clamp names, pad columns
+            const dName  = p(d.name, 16);
+            const dType  = p(d.type, 12);
+            const dRev   = p(fm(d.revenue), 10);
+            const dEmp   = p(String(d.employees), 5);
+            const dProds = p(String(d.products), 8);
+            const resStr = "  Rsch: " + dim(fm(d.research));
+            const line   = " " + cyan(dName) + " " + dim(dType) + " " +
+                           green(dRev) + " " + dEmp + " " + yellow(dProds) + resStr;
+            ns.print(row(line));
+        }
+    }
+
+    // Upgrades being purchased
+    ns.print(mid);
+    if (lastUpgrades.length > 0) {
+        ns.print(row(" " + bold(" Queued upgrades:")));
+        for (const u of lastUpgrades) ns.print(row("   " + yellow(u)));
+    } else {
+        ns.print(row("  " + dim("No cheap upgrades available this cycle.")));
+    }
+
+    ns.print(bot);
+    ns.print(dim("  Cycle complete — sleeping 30s"));
+}
+
 export async function main(ns) {
     ns.disableLog('ALL');
+    ns.tail();
 
     const cities = ["Aevum", "Chongqing", "Sector-12", "New Tokyo", "Ishima", "Volkov"];
     const productCity = "Sector-12"; // Main prod/sales city
@@ -60,6 +222,10 @@ export async function main(ns) {
     }
 
     while (true) {
+        // ── Dashboard: print current state before doing anything ────
+        ns.clearLog();
+        printCorpDashboard(ns);
+
         corp = ns.corporation.getCorporation();
 
         for (let div of corp.divisions) {

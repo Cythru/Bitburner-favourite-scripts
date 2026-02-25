@@ -357,6 +357,7 @@ export async function main(ns) {
             const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
             ns.stock.sellStock(sym, s.longShares);
             recordTrade(sym, "L", pnl);
+            s.longShares = 0; s.longAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
           } catch { /* position already closed or API unavailable */ }
@@ -372,6 +373,7 @@ export async function main(ns) {
             const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
             ns.stock.sellShort(sym, s.shortShares);
             recordTrade(sym, "S", pnl);
+            s.shortShares = 0; s.shortAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
           } catch { hasShorts = false; }  // SF not unlocked for shorts
@@ -565,8 +567,10 @@ export async function main(ns) {
       const price  = ns.stock.getAskPrice(best.sym);
       const shares = Math.min(Math.floor((betSize - CONFIG.commission) / price), best.stock.maxShares);
       if (shares > 0) {
-        ns.stock.buyStock(best.sym, shares);
-        yolo.activeBet = { sym: best.sym, type: "Long", shares, entryPrice: price, tick: tickCount };
+        const boughtAt = ns.stock.buyStock(best.sym, shares);
+        if (boughtAt > 0) {
+          yolo.activeBet = { sym: best.sym, type: "Long", shares, entryPrice: price, tick: tickCount };
+        }
       }
     } else if (hasShorts) {
       // Bearish — go short
@@ -574,8 +578,10 @@ export async function main(ns) {
         const price  = ns.stock.getBidPrice(best.sym);
         const shares = Math.min(Math.floor((betSize - CONFIG.commission) / price), best.stock.maxShares);
         if (shares > 0) {
-          ns.stock.buyShort(best.sym, shares);
-          yolo.activeBet = { sym: best.sym, type: "Short", shares, entryPrice: price, tick: tickCount };
+          const boughtAt = ns.stock.buyShort(best.sym, shares);
+          if (boughtAt > 0) {
+            yolo.activeBet = { sym: best.sym, type: "Short", shares, entryPrice: price, tick: tickCount };
+          }
         }
       } catch { hasShorts = false; }
     }

@@ -262,6 +262,7 @@ export async function main(ns) {
             recordTrade(pnl);
             recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
             if (recentTrades.length > 10) recentTrades.shift();
+            s.longShares = 0; s.longAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;
           } catch { /* API unavailable or position already closed */ }
@@ -276,6 +277,7 @@ export async function main(ns) {
             recordTrade(pnl);
             recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
             if (recentTrades.length > 10) recentTrades.shift();
+            s.shortShares = 0; s.shortAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;
           } catch { hasShorts = false; }

@@ -113,7 +113,7 @@ export async function main(ns) {
                     }
                 }
             }
-            status = \`👥 \${info.members.length}/12 | ⭐ Respect: \${ns.nFormat(info.respect,"0.00a")} | ⚖️ Wanted: \${info.wantedLevel.toFixed(1)} | 🗺️ Terr: \${(info.territory*100).toFixed(2)}% (vs \${opponent}: \${(bestClash*100).toFixed(0)}%)\`;
+            status = \`👥 \${ns.gang.getMemberNames().length}/12 | ⭐ Respect: \${ns.nFormat(info.respect,"0.00a")} | ⚖️ Wanted: \${info.wantedLevel.toFixed(1)} | 🗺️ Terr: \${(info.territory*100).toFixed(2)}% (vs \${opponent}: \${(bestClash*100).toFixed(0)}%)\`;
         }
         ns.clearLog();
         ns.print(\`💰 Money: \${ns.nFormat(money, "$0.00a")}\`);
@@ -168,9 +168,10 @@ async function eliteGangManage(ns, statsHistory, stagnationLimit, goalRatio) {
     for (const name of members) {
         const mem = ns.gang.getMemberInformation(name);
 
-        // Ascend first
+        // Ascend first — check average combat stat multiplier gain, not asc.respect
+        // (asc.respect = respect LOST on ascend, a large number unrelated to ASCEND_MULTIPLIER)
         const asc = ns.gang.getAscensionResult(name);
-        if (asc && asc.respect > ASCEND_MULTIPLIER) {
+        if (asc && (asc.str + asc.def + asc.dex + asc.agi) / 4 >= ASCEND_MULTIPLIER) {
             ns.gang.ascendMember(name);
             ns.tprint(`⭐ ${name} ascended (${asc.respect.toFixed(2)}x)`);
             actions.asc++;
@@ -196,6 +197,7 @@ async function eliteGangManage(ns, statsHistory, stagnationLimit, goalRatio) {
                               memberAvgCombat < 300;  // new members
 
         let memberTask = needsTraining ? "Train Combat" : productiveTask;
+        if (needsTraining) actions.train++;
         if (needsTraining && history.stagnantCycles >= stagnationLimit) {
             actions.stagnate++;
             ns.print(`⚠️ ${name} stagnant → forcing training`);
@@ -205,9 +207,9 @@ async function eliteGangManage(ns, statsHistory, stagnationLimit, goalRatio) {
         const equipList = ns.gang.getEquipmentNames()
             .filter(e => !mem.upgrades.includes(e) && !mem.augmentations.includes(e));
         if (equipList.length > 0) {
-            const sorted = equipList.sort((a, b) => 
-                (ns.gang.getEquipmentCost(b) / equipmentCombatValue(ns, b)) - 
-                (ns.gang.getEquipmentCost(a) / equipmentCombatValue(ns, a))
+            const sorted = equipList.sort((a, b) =>
+                (ns.gang.getEquipmentCost(a) / equipmentCombatValue(ns, a)) -
+                (ns.gang.getEquipmentCost(b) / equipmentCombatValue(ns, b))
             );
             for (const eq of sorted.slice(0, 6)) {
                 const cost = ns.gang.getEquipmentCost(eq);
@@ -256,7 +258,8 @@ async function smartUpgrades(ns) {
         let bought = 0;
         while (cost < money * 0.2 && pservs.length + bought < 25) {
             const name = `farm-${pservs.length + bought}`;
-            if (ns.purchaseServer(name, ram)) bought++;
+            if (!ns.purchaseServer(name, ram)) break;
+            bought++;
         }
         if (bought) ns.tprint(`🆕 +${bought} pservs (${ram}GB)`);
     }
@@ -264,8 +267,10 @@ async function smartUpgrades(ns) {
         const maxRam = Math.max(...pservs.map(s => ns.getServerMaxRam(s)));
         const next = maxRam * 2;
         if (next <= (1 << 20)) {
-            const costPer = ns.getPurchasedServerUpgradeCost(pservs[0], next);
-            if (costPer * pservs.length < money * 0.8) {
+            const totalCost = pservs.reduce((sum, s) => {
+                try { return sum + ns.getPurchasedServerUpgradeCost(s, next); } catch { return sum; }
+            }, 0);
+            if (totalCost < money * 0.8) {
                 for (const s of pservs) ns.upgradePurchasedServer(s, next);
                 ns.tprint(`🔄 pservs → ${next}GB`);
             }

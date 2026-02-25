@@ -136,8 +136,10 @@ export async function main(ns) {
       const p = port.positions[sym];
       const bid = ns.stock.getBidPrice(sym);
       const ask = ns.stock.getAskPrice(sym);
-      if (p.longShares > 0) val += p.longShares * bid - COMMISSION;
-      if (p.shortShares > 0) val += p.shortShares * (2 * p.shortAvgPrice - ask) - COMMISSION;
+      // No commission deducted here — commission is only charged at sell time,
+      // not for holding. Subtracting it here double-counts it against every tick's value.
+      if (p.longShares > 0) val += p.longShares * bid;
+      if (p.shortShares > 0) val += p.shortShares * (2 * p.shortAvgPrice - ask);
     }
     return val;
   }
@@ -147,7 +149,8 @@ export async function main(ns) {
     const p = getPosition(port, sym);
     if (type === "Long" && p.longShares > 0) {
       const exitPrice = ns.stock.getBidPrice(sym);
-      const pnl = p.longShares * (exitPrice - p.longAvgPrice) - COMMISSION;
+      // Both commissions (buy + sell) counted so win/loss is accurate
+      const pnl = p.longShares * (exitPrice - p.longAvgPrice) - 2 * COMMISSION;
       port.trades.push({ sym, type: "Long", shares: p.longShares, entryPrice: p.longAvgPrice, exitPrice, pnl, tick: tickCount });
       port.cash += p.longShares * exitPrice - COMMISSION;
       p.longShares = 0;
@@ -155,7 +158,8 @@ export async function main(ns) {
     }
     if (type === "Short" && p.shortShares > 0) {
       const exitPrice = ns.stock.getAskPrice(sym);
-      const pnl = p.shortShares * (p.shortAvgPrice - exitPrice) - COMMISSION;
+      // Both commissions (buy + sell) counted so win/loss is accurate
+      const pnl = p.shortShares * (p.shortAvgPrice - exitPrice) - 2 * COMMISSION;
       port.trades.push({ sym, type: "Short", shares: p.shortShares, entryPrice: p.shortAvgPrice, exitPrice, pnl, tick: tickCount });
       port.cash += p.shortShares * (2 * p.shortAvgPrice - exitPrice) - COMMISSION;
       p.shortShares = 0;

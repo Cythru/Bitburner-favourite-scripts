@@ -8,7 +8,7 @@ export async function main(ns) {
   ns.tail();
 
   const COMMISSION = 100000;
-  const GRADUATE_TICKS = 200;
+  const GRADUATE_TICKS = 300;  // more cycles = better statistical confidence
   // +2% above raw 55% to compensate for bid/ask spread optimism in virtual P/L.
   // Virtual sells use getBidPrice directly; real trades use getSaleGain() which
   // accounts for the spread. Paper results are slightly better than real results.
@@ -96,11 +96,19 @@ export async function main(ns) {
     const h = priceHistory[sym];
     if (!h || h.length < 3) return { est: 0.5, estShort: 0.5, inversion: false };
     const longLen = Math.min(76, h.length - 1);
-    let longUps = 0;
+
+    // Weighted long-window forecast: matches lib/estimate.js (1.0 → 2.0 weighting).
+    // Critical: paper trader must use the same algorithm as the real trader or
+    // graduation win rates are computed against a different signal — paper results
+    // won't transfer to live trading.
+    let longWeightedUps = 0, longWeightTotal = 0;
     for (let i = h.length - longLen; i < h.length; i++) {
-      if (h[i] > h[i - 1]) longUps++;
+      const pos = i - (h.length - longLen);
+      const w   = 1 + (longLen > 1 ? pos / (longLen - 1) : 0);
+      longWeightTotal += w;
+      if (h[i] > h[i - 1]) longWeightedUps += w;
     }
-    const est = longUps / longLen;
+    const est = longWeightTotal > 0 ? longWeightedUps / longWeightTotal : 0.5;
 
     const sLen = Math.min(shortWindow, h.length - 1);
     let shortUps = 0;
@@ -145,10 +153,14 @@ export async function main(ns) {
   }
 
   // Virtual sell
+  // Apply 0.3% spread penalty to match getSaleGain() in the real trader.
+  // Raw getBidPrice/getAskPrice is optimistic — the real trader's getSaleGain()
+  // accounts for the bid/ask spread. Without this correction, paper results
+  // overstate win rates by ~0.5-1%, causing over-graduation.
   function virtualSell(port, sym, type) {
     const p = getPosition(port, sym);
     if (type === "Long" && p.longShares > 0) {
-      const exitPrice = ns.stock.getBidPrice(sym);
+      const exitPrice = ns.stock.getBidPrice(sym) * 0.997;  // simulate spread
       // Both commissions (buy + sell) counted so win/loss is accurate
       const pnl = p.longShares * (exitPrice - p.longAvgPrice) - 2 * COMMISSION;
       port.trades.push({ sym, type: "Long", shares: p.longShares, entryPrice: p.longAvgPrice, exitPrice, pnl, tick: tickCount });
@@ -157,7 +169,7 @@ export async function main(ns) {
       p.longAvgPrice = 0;
     }
     if (type === "Short" && p.shortShares > 0) {
-      const exitPrice = ns.stock.getAskPrice(sym);
+      const exitPrice = ns.stock.getAskPrice(sym) * 1.003;  // simulate spread
       // Both commissions (buy + sell) counted so win/loss is accurate
       const pnl = p.shortShares * (p.shortAvgPrice - exitPrice) - 2 * COMMISSION;
       port.trades.push({ sym, type: "Short", shares: p.shortShares, entryPrice: p.shortAvgPrice, exitPrice, pnl, tick: tickCount });

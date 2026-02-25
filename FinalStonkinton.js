@@ -133,6 +133,22 @@ export async function main(ns) {
     // Reduces unnecessary API calls during quiet market periods.
     flatBuySkipFloor: 0.0003,     // max |ER| below which market is considered flat
     flatBuySkipTicks: 3,          // consecutive flat ticks required before skipping
+
+    // ── Kelly-adjacent position sizing ──
+    // Per-stock allocation = |ER| / (vol² × KELLY_K), capped at maxPortfolioPct.
+    // High-vol stocks get smaller allocations; high-confidence signals get more.
+    KELLY_K:               30,    // Kelly divisor — higher = smaller, more conservative bets
+
+    // ── Early profit-taking ──
+    // Exit positions that are up ≥5% after 40+ ticks without waiting for neutral forecast.
+    // Locks in gains that would likely evaporate over a full cycle.
+    STALE_PROFIT_PCT:      0.05,  // minimum gain to trigger early exit (5%)
+    STALE_MIN_TICKS_PROFIT: 40,   // minimum age before early profit exit applies
+
+    // ── Portfolio drawdown halt ──
+    // Skip new buys if portfolio has fallen >20% from its session peak.
+    // Sells are unaffected — positions can still be exited normally.
+    MAX_DRAWDOWN_HALT:     0.20,  // drawdown fraction that halts new buys
   };
 
 
@@ -196,8 +212,9 @@ export async function main(ns) {
   let   tickCount      = 0;      // how many market ticks since script started
   let   totalProfit    = 0;      // cumulative realized P/L this session
   let   totalTradeCount = 0;     // number of completed trades this session
-  let   flatTicks      = 0;      // consecutive ticks with no meaningful market signal
-  const sessionStart   = Date.now();  // for calculating elapsed time and $/min
+  let   flatTicks          = 0;      // consecutive ticks with no meaningful market signal
+  let   sessionPeakWorth   = 0;      // highest net worth seen this session (for drawdown halt)
+  const sessionStart       = Date.now();  // for calculating elapsed time and $/min
   const worthHistory   = [];     // net worth samples for the sparkline graph (last 120)
   const recentTrades   = [];     // last 5 closed trades for dashboard display
 
@@ -265,7 +282,9 @@ export async function main(ns) {
       maxShares:       ns.stock.getMaxShares(sym),  // Bitburner caps shares per stock
       ticksSinceAction: 999,     // cooldown tracker — avoid rapid re-entry
       positionOpenTick: 0,       // tick when position was first opened (0 = flat)
-      inversionFlag:   false,    // true when market cycle flip detected
+      inversionFlag:   false,    // true when market cycle flip confirmed (2 ticks)
+      inversionSince:  0,        // tickCount when raw inversion first detected (0 = none)
+      inversionEarly:  false,    // true when flip is propagating (1-2 ticks before confirmed)
     };
   }
 
@@ -283,11 +302,32 @@ export async function main(ns) {
   // and store results back on the stock object.
   // Called every tick for every stock, even with 4S data,
   // because the inversion detector needs continuous data.
+  //
+  // Inversion confirmation: raw inversionFlag from estimate.js is debounced
+  // over 2 ticks to filter single-tick noise. stock.inversionFlag only
+  // becomes true after the raw signal persists for ≥1 additional tick.
   function runEstimation(stock) {
-    const est = estimateForecast(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta);
-    stock.estForecast      = est.forecast;       // probability stock goes up (estimated)
-    stock.estForecastShort = est.forecastShort;   // same but short window
-    stock.inversionFlag    = est.inversionFlag;   // true = market cycle flip detected
+    // Pass estimated volatility to enable adaptive inversion delta.
+    // Uses previous-tick vol (ok: estimate.js vol is smooth, single-tick lag negligible).
+    const vol = estimateVolatility(stock.priceHistory);
+    const est = estimateForecast(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta, vol);
+
+    stock.estForecast      = est.forecast;
+    stock.estForecastShort = est.forecastShort;
+    stock.inversionEarly   = est.inversionEarly ?? false;  // leading indicator
+
+    // ── 2-tick inversion confirmation ──
+    // rawInv fires on the first tick of disagreement.
+    // We set inversionFlag=true only after it persists for ≥1 more tick.
+    // This prevents 1-tick noise spikes from triggering hard exits.
+    const rawInv = est.inversionFlag;
+    if (rawInv) {
+      if (stock.inversionSince === 0) stock.inversionSince = tickCount;
+      if (tickCount - stock.inversionSince >= 1) stock.inversionFlag = true;
+    } else {
+      stock.inversionSince = 0;
+      stock.inversionFlag  = false;
+    }
   }
 
   // THE key trading metric. Positive ER = expected profit, negative = expected loss.
@@ -309,9 +349,10 @@ export async function main(ns) {
   // ═══════════════════════════════════════════════════════════════
 
   // Called after every sell. Updates running totals and recent trade list.
-  function recordTrade(sym, type, pnl) {
+  // Optional tag is stored on the trade for logging (e.g., " [EARLY]").
+  function recordTrade(sym, type, pnl, tag = "") {
     totalProfit += pnl;
-    recentTrades.push({ sym, type, pnl, tick: tickCount });
+    recentTrades.push({ sym, type, pnl, tick: tickCount, tag });
     if (recentTrades.length > 5) recentTrades.shift();  // keep last 5 for dashboard
     totalTradeCount++;
   }
@@ -344,19 +385,32 @@ export async function main(ns) {
       // ── Stale position check ──
       // A position is "stale" if it's been open for > one full cycle (75 ticks)
       // and the forecast has returned to neutral — no edge left, free the capital.
-      const stale = s.positionOpenTick > 0
-        && (tickCount - s.positionOpenTick) > CONFIG.staleExitTicks
-        && Math.abs(f - 0.5) < CONFIG.staleNeutralBand;
+      const age   = s.positionOpenTick > 0 ? tickCount - s.positionOpenTick : 0;
+      const stale = age > CONFIG.staleExitTicks && Math.abs(f - 0.5) < CONFIG.staleNeutralBand;
 
       // ── Exit long positions ──
       if (s.longShares > 0) {
-        if (f < CONFIG.forecastSellLong || er < sellThreshold || s.inversionFlag || stale) {
-          // Calculate P/L: what we'd get selling minus what we paid
+        // inversionEarly tightens the sell threshold by 0.01 (exit 1-2 ticks before confirmed flip)
+        const effectiveSellLong = CONFIG.forecastSellLong + (s.inversionEarly ? 0.01 : 0);
+
+        // Early profit exit: if up ≥5% after 40+ ticks, take the gain now
+        let earlyProfit = false;
+        if (age > CONFIG.STALE_MIN_TICKS_PROFIT) {
+          try {
+            const sg   = ns.stock.getSaleGain(sym, s.longShares, "Long");
+            const cost = s.longShares * s.longAvgPrice;
+            earlyProfit = cost > 0 && (sg - cost) / cost > CONFIG.STALE_PROFIT_PCT;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f < effectiveSellLong || er < sellThreshold || s.inversionFlag || stale || earlyProfit) {
+          // [EARLY] tag: inversionEarly was the deciding factor (would NOT exit at normal threshold)
+          const tag = (s.inversionEarly && f >= CONFIG.forecastSellLong && f < effectiveSellLong) ? " [EARLY]" : "";
           // Zero-trust: validate getSaleGain doesn't throw (can fail if position changed)
           try {
             const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
             ns.stock.sellStock(sym, s.longShares);
-            recordTrade(sym, "L", pnl);
+            recordTrade(sym, "L", pnl, tag);
             s.longShares = 0; s.longAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
@@ -368,11 +422,23 @@ export async function main(ns) {
       // Shorts profit when price goes DOWN, so conditions are inverted:
       // sell when forecast goes ABOVE threshold (stock recovering)
       if (s.shortShares > 0 && hasShorts) {
-        if (f > CONFIG.forecastSellShort || er > -sellThreshold || s.inversionFlag || stale) {
+        const effectiveSellShort = CONFIG.forecastSellShort - (s.inversionEarly ? 0.01 : 0);
+
+        let earlyProfit = false;
+        if (age > CONFIG.STALE_MIN_TICKS_PROFIT) {
+          try {
+            const sg   = ns.stock.getSaleGain(sym, s.shortShares, "Short");
+            const cost = s.shortShares * s.shortAvgPrice;
+            earlyProfit = cost > 0 && (sg - cost) / cost > CONFIG.STALE_PROFIT_PCT;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f > effectiveSellShort || er > -sellThreshold || s.inversionFlag || stale || earlyProfit) {
+          const tag = (s.inversionEarly && f <= CONFIG.forecastSellShort && f > effectiveSellShort) ? " [EARLY]" : "";
           try {
             const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
             ns.stock.sellShort(sym, s.shortShares);
-            recordTrade(sym, "S", pnl);
+            recordTrade(sym, "S", pnl, tag);
             s.shortShares = 0; s.shortAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
@@ -397,6 +463,14 @@ export async function main(ns) {
   // ═══════════════════════════════════════════════════════════════
 
   function buyPhase() {
+    // ── Portfolio drawdown halt ──
+    // Skip all new buys if portfolio has fallen >20% from session peak.
+    // Prevents deploying capital into a sustained bear cycle.
+    // Sells are unaffected — positions can still exit normally.
+    const tw = totalWorth(ns);
+    if (tw > sessionPeakWorth) sessionPeakWorth = tw;
+    if (tw < sessionPeakWorth * (1 - CONFIG.MAX_DRAWDOWN_HALT)) return;
+
     // ── Flat market short-circuit ──
     // If every stock has negligible expected return, nothing is worth buying.
     // Track consecutive flat ticks and skip after the threshold to save API calls.
@@ -410,8 +484,7 @@ export async function main(ns) {
     const cash = ns.getServerMoneyAvailable("home") - CONFIG.reserveCash;
     if (cash < 1e6) return;  // not enough after reserve — skip buying
 
-    const tw           = totalWorth(ns);
-    const maxPerStock  = tw * CONFIG.maxPortfolioPct;  // dollar cap per stock
+    // tw already computed above for drawdown check
     const buyThreshold = has4S ? CONFIG.buyThreshold4S : CONFIG.buyThresholdEst;
     const invested     = tw - ns.getServerMoneyAvailable("home");  // how much is already in stocks
     const spendable    = Math.min(cash, tw * CONFIG.maxDeploy - invested);  // respect 80% cap
@@ -435,11 +508,21 @@ export async function main(ns) {
       if (avail < 2e6) break;  // need at least $2m to make a meaningful purchase
       const s = r.stock;
 
+      // ── Kelly-adjacent position sizing ──
+      // Fraction = |ER| / (vol² × KELLY_K), capped at maxPortfolioPct.
+      // High-vol stocks get smaller allocations (more risk per $ invested).
+      // High-ER signals get more capital (stronger edge = larger bet justified).
+      const vol        = has4S ? s.volatility : estimateVolatility(s.priceHistory);
+      const kellyFrac  = vol > 0
+        ? Math.min(CONFIG.maxPortfolioPct, Math.abs(r.er) / (vol * vol * CONFIG.KELLY_K))
+        : CONFIG.maxPortfolioPct;
+      const perStockCap = tw * kellyFrac;
+
       // Calculate how much room we have for this stock
       // (cap - current position value = remaining budget for this stock)
       const curLongVal  = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
       const curShortVal = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
-      const budget = Math.min(avail, maxPerStock - curLongVal - curShortVal);
+      const budget = Math.min(avail, perStockCap - curLongVal - curShortVal);
       if (budget < 2e6) continue;
 
       // ── Buy long on bullish forecast ──
@@ -602,7 +685,7 @@ export async function main(ns) {
   function doLogTrade(trade) {
     const tw = totalWorth(ns);
     logTrade(ns, LOG_FILE, trade,
-      ` | Total:${ns.formatNumber(totalProfit)} | Worth:${ns.formatNumber(tw)}`);
+      `${trade.tag || ""} | Total:${ns.formatNumber(totalProfit)} | Worth:${ns.formatNumber(tw)}`);
   }
 
   // Snapshot session state every 100 ticks (for performance analysis)

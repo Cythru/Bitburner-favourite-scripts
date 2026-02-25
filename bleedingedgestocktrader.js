@@ -79,6 +79,9 @@ export async function main(ns) {
     longWindow:       76,
     shortWindow:      8,
     inversionDelta:   0.12,
+
+    // Kelly-adjacent sizing: |ER| / (vol² × kellyK), capped at maxPerStock
+    kellyK:           30,
   };
 
 
@@ -139,7 +142,8 @@ export async function main(ns) {
       estVolatility:    0.01,
       blendedForecast:  0.5,
       blendedVolatility: 0.01,
-      inversionFlag:    false,
+      inversionFlag:    false,    // confirmed flip (2-tick debounced)
+      inversionSince:   0,        // tickCount when raw inversion first detected
       momentum:         0,
       longShares:       0,
       longAvgPrice:     0,
@@ -165,12 +169,22 @@ export async function main(ns) {
       return;
     }
 
-    const est = estimateForecast(h, cfg.longWindow, cfg.shortWindow, cfg.inversionDelta);
+    const vol = estimateVolatility(h);
+    const est = estimateForecast(h, cfg.longWindow, cfg.shortWindow, cfg.inversionDelta, vol);
     s.estForecast      = est.forecast;
     s.estForecastShort = est.forecastShort;
-    s.inversionFlag    = est.inversionFlag;
-    s.estVolatility    = estimateVolatility(h);
+    s.estVolatility    = vol;
     s.momentum         = calcMomentum(h);
+
+    // 2-tick inversion confirmation: raw flag must persist for ≥1 additional tick
+    const rawInv = est.inversionFlag;
+    if (rawInv) {
+      if (s.inversionSince === 0) s.inversionSince = tickCount;
+      if (tickCount - s.inversionSince >= 1) s.inversionFlag = true;
+    } else {
+      s.inversionSince = 0;
+      s.inversionFlag  = false;
+    }
   }
 
   function updateBlended(s) {
@@ -208,6 +222,7 @@ export async function main(ns) {
     totalProfit += pnl;
     totalTradeCount++;
     allTradePnls.push(pnl);
+    if (allTradePnls.length > 100) allTradePnls.shift();  // cap memory growth
 
     if (pnl >= 0) { adapt.streakCount = Math.max(1, adapt.streakCount + 1); }
     else           { adapt.streakCount = Math.min(-1, adapt.streakCount - 1); }
@@ -250,12 +265,21 @@ export async function main(ns) {
       const er = expectedReturn(s);
 
       // Stale exit: position held > one full cycle with neutral signal → free capital
-      const stale = s.positionOpenTick > 0
-        && (tickCount - s.positionOpenTick) > 75
-        && Math.abs(f - 0.5) < 0.02;
+      const age   = s.positionOpenTick > 0 ? tickCount - s.positionOpenTick : 0;
+      const stale = age > 75 && Math.abs(f - 0.5) < 0.02;
 
       if (s.longShares > 0) {
-        if (f < cfg.forecastSellLong || er < cfg.sellThreshold || s.inversionFlag || s.momentum < -0.3 || stale) {
+        // Early profit exit: take gains ≥5% after 40+ ticks without waiting for forecast neutral
+        let earlyProfit = false;
+        if (age > 40) {
+          try {
+            const sg   = ns.stock.getSaleGain(sym, s.longShares, "Long");
+            const cost = s.longShares * s.longAvgPrice;
+            earlyProfit = cost > 0 && (sg - cost) / cost > 0.05;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f < cfg.forecastSellLong || er < cfg.sellThreshold || s.inversionFlag || s.momentum < -0.3 || stale || earlyProfit) {
           try {
             const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
             ns.stock.sellStock(sym, s.longShares);
@@ -270,7 +294,16 @@ export async function main(ns) {
       }
 
       if (s.shortShares > 0 && hasShorts) {
-        if (f > cfg.forecastSellShort || er > -cfg.sellThreshold || s.inversionFlag || s.momentum > 0.3 || stale) {
+        let earlyProfit = false;
+        if (age > 40) {
+          try {
+            const sg   = ns.stock.getSaleGain(sym, s.shortShares, "Short");
+            const cost = s.shortShares * s.shortAvgPrice;
+            earlyProfit = cost > 0 && (sg - cost) / cost > 0.05;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f > cfg.forecastSellShort || er > -cfg.sellThreshold || s.inversionFlag || s.momentum > 0.3 || stale || earlyProfit) {
           try {
             const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
             ns.stock.sellShort(sym, s.shortShares);
@@ -319,7 +352,13 @@ export async function main(ns) {
       if (avail < 2e6) break;
       const s = r.stock;
 
-      const effectiveMax = tw * cfg.maxPerStock * adapt.confidence;
+      // Confidence scaling: additive formula so low-confidence gets 80% of cap,
+      // not near-zero. At confidence=0.2: 0.75+0.05=80%. At 1.0: 0.75+0.25=100%.
+      const confScale   = 0.75 + 0.25 * adapt.confidence;
+      // Kelly-adjacent sizing: |ER| / (vol² × kellyK), capped at maxPerStock
+      const vol         = s.blendedVolatility > 0 ? s.blendedVolatility : 0.01;
+      const kellyFrac   = Math.min(cfg.maxPerStock, Math.abs(r.er) / (vol * vol * cfg.kellyK));
+      const effectiveMax = tw * kellyFrac * confScale;
       const curLongVal   = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
       const curShortVal  = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
       const budget = Math.min(avail, effectiveMax - curLongVal - curShortVal);

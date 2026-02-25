@@ -61,10 +61,13 @@ export async function main(ns) {
   const SHORT_WINDOW    = 10;
   const INVERSION_DELTA = 0.15;
 
-  const STALE_EXIT_TICKS   = 75;    // force-exit if position held this long with neutral signal
-  const STALE_NEUTRAL_BAND = 0.02;  // neutral = forecast within 0.02 of 0.5
-  const FLAT_ER_FLOOR      = 0.0003;// skip buy if max |ER| below this
-  const FLAT_SKIP_TICKS    = 3;     // consecutive flat ticks before skipping buy
+  const STALE_EXIT_TICKS    = 75;    // force-exit if position held this long with neutral signal
+  const STALE_NEUTRAL_BAND  = 0.02;  // neutral = forecast within 0.02 of 0.5
+  const FLAT_ER_FLOOR       = 0.0003;// skip buy if max |ER| below this
+  const FLAT_SKIP_TICKS     = 3;     // consecutive flat ticks before skipping buy
+  const STALE_PROFIT_PCT    = 0.05;  // exit early if position up ≥5% after 40+ ticks
+  const STALE_MIN_TICKS_PROFIT = 40; // minimum age before early profit exit applies
+  const KELLY_K             = 30;    // Kelly divisor for position sizing
 
   const { theme, name: THEME } = getTheme(ns);
   const C = makeColors(theme);
@@ -82,6 +85,7 @@ export async function main(ns) {
   let hasShorts       = true;
   let has4S           = false;
   const positionOpenTick = {}; // sym → tick when position first opened (0 = flat)
+  const inversionSince   = {}; // sym → tick when raw inversion first detected (0 = none)
 
   const history      = {};
   const stockData    = {};
@@ -129,9 +133,10 @@ export async function main(ns) {
   const symbols = ns.stock.getSymbols();
   const maxShares = {};
   for (const sym of symbols) {
-    maxShares[sym] = ns.stock.getMaxShares(sym);
-    history[sym] = [];
-    stockData[sym] = { forecast: 0.5, volatility: 0.01, inversionFlag: false };
+    maxShares[sym]    = ns.stock.getMaxShares(sym);
+    history[sym]      = [];
+    stockData[sym]    = { forecast: 0.5, volatility: 0.01, inversionFlag: false };
+    inversionSince[sym] = 0;
   }
 
 
@@ -140,18 +145,29 @@ export async function main(ns) {
   // ═══════════════════════════════════════════════════════════
 
   function updateEstimates(sym) {
-    const h = history[sym];
+    const h  = history[sym];
     const sd = stockData[sym];
 
     if (h.length < 3) {
       sd.forecast = 0.5; sd.volatility = 0.01; sd.inversionFlag = false;
+      inversionSince[sym] = 0;
       return;
     }
 
-    const est = estimateForecast(h, LONG_WINDOW, SHORT_WINDOW, INVERSION_DELTA);
-    sd.forecast      = est.forecast;
-    sd.inversionFlag = est.inversionFlag;
-    sd.volatility    = estimateVolatility(h);
+    const vol = estimateVolatility(h);
+    const est = estimateForecast(h, LONG_WINDOW, SHORT_WINDOW, INVERSION_DELTA, vol);
+    sd.forecast   = est.forecast;
+    sd.volatility = vol;
+
+    // 2-tick inversion confirmation: raw flag must persist ≥1 additional tick
+    const rawInv = est.inversionFlag;
+    if (rawInv) {
+      if (inversionSince[sym] === 0) inversionSince[sym] = tickCount;
+      sd.inversionFlag = tickCount - inversionSince[sym] >= 1;
+    } else {
+      inversionSince[sym] = 0;
+      sd.inversionFlag    = false;
+    }
   }
 
   function getForecast(sym) {
@@ -297,41 +313,60 @@ export async function main(ns) {
 
     if (!has4S && tickCount < 10) { printDash(); continue; }
 
-    const tw             = totalWorth(ns);
-    const perStockBudget = tw * MAX_PER_STOCK;
-    const tradesBefore   = totalTradeCount;
+    const tw           = totalWorth(ns);
+    const tradesBefore = totalTradeCount;
 
     // ── SELL ──
     for (const sym of symbols) {
       const [ls, lap, ss, sap] = ns.stock.getPosition(sym);
       const f   = getForecast(sym);
       const inv = getInversion(sym);
-      const stale = (positionOpenTick[sym] || 0) > 0
-        && (tickCount - positionOpenTick[sym]) > STALE_EXIT_TICKS
-        && Math.abs(f - 0.5) < STALE_NEUTRAL_BAND;
+      const age   = (positionOpenTick[sym] || 0) > 0 ? tickCount - positionOpenTick[sym] : 0;
+      const stale = age > STALE_EXIT_TICKS && Math.abs(f - 0.5) < STALE_NEUTRAL_BAND;
 
-      if (ls > 0 && (f < SELL_LONG || inv || stale)) {
-        try {
-          const pnl = ns.stock.getSaleGain(sym, ls, "Long") - ls * lap;
-          ns.stock.sellStock(sym, ls);
-          totalProfit += pnl;  // after sell — avoids double-count if sell throws
-          positionOpenTick[sym] = 0;
-          recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
-          if (recentTrades.length > 5) recentTrades.shift();
-          totalTradeCount++;
-        } catch { /* position already gone or API unavailable */ }
+      if (ls > 0) {
+        // Early profit exit: up ≥5% after 40+ ticks → take the gain now
+        let earlyProfit = false;
+        if (age > STALE_MIN_TICKS_PROFIT) {
+          try {
+            const sg = ns.stock.getSaleGain(sym, ls, "Long");
+            earlyProfit = lap > 0 && (sg - ls * lap) / (ls * lap) > STALE_PROFIT_PCT;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f < SELL_LONG || inv || stale || earlyProfit) {
+          try {
+            const pnl = ns.stock.getSaleGain(sym, ls, "Long") - ls * lap;
+            ns.stock.sellStock(sym, ls);
+            totalProfit += pnl;  // after sell — avoids double-count if sell throws
+            positionOpenTick[sym] = 0;
+            recentTrades.push({ sym, type: "L", pnl, tick: tickCount });
+            if (recentTrades.length > 5) recentTrades.shift();
+            totalTradeCount++;
+          } catch { /* position already gone or API unavailable */ }
+        }
       }
 
-      if (ss > 0 && hasShorts && (f > SELL_SHORT || inv || stale)) {
-        try {
-          const pnl = ns.stock.getSaleGain(sym, ss, "Short") - ss * sap;
-          ns.stock.sellShort(sym, ss);
-          totalProfit += pnl;  // after sell — avoids double-count if sell throws
-          positionOpenTick[sym] = 0;
-          recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
-          if (recentTrades.length > 5) recentTrades.shift();
-          totalTradeCount++;
-        } catch { hasShorts = false; }
+      if (ss > 0 && hasShorts) {
+        let earlyProfit = false;
+        if (age > STALE_MIN_TICKS_PROFIT) {
+          try {
+            const sg = ns.stock.getSaleGain(sym, ss, "Short");
+            earlyProfit = sap > 0 && (sg - ss * sap) / (ss * sap) > STALE_PROFIT_PCT;
+          } catch { /* API unavailable */ }
+        }
+
+        if (f > SELL_SHORT || inv || stale || earlyProfit) {
+          try {
+            const pnl = ns.stock.getSaleGain(sym, ss, "Short") - ss * sap;
+            ns.stock.sellShort(sym, ss);
+            totalProfit += pnl;  // after sell — avoids double-count if sell throws
+            positionOpenTick[sym] = 0;
+            recentTrades.push({ sym, type: "S", pnl, tick: tickCount });
+            if (recentTrades.length > 5) recentTrades.shift();
+            totalTradeCount++;
+          } catch { hasShorts = false; }
+        }
       }
     }
 
@@ -351,21 +386,27 @@ export async function main(ns) {
       const ranked = symbols.map(sym => {
         const f = getForecast(sym);
         const v = getVolatility(sym);
-        return { sym, f, er: v * (f - 0.5), inv: getInversion(sym) };
+        return { sym, f, er: v * (f - 0.5), inv: getInversion(sym), v };
       })
       .filter(item => Math.abs(item.er) > MIN_ER && !item.inv)
       .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
 
       let avail = canSpend;
 
-      for (const { sym, f } of ranked) {
+      for (const { sym, f, er, v } of ranked) {
         if (avail < 2e6) break;
+
+        // Kelly-adjacent sizing: |ER| / (vol² × KELLY_K), capped at MAX_PER_STOCK
+        const kellyFrac   = v > 0
+          ? Math.min(MAX_PER_STOCK, Math.abs(er) / (v * v * KELLY_K))
+          : MAX_PER_STOCK;
+        const perStockCap = tw * kellyFrac;
 
         const [ls, , ss] = ns.stock.getPosition(sym);
         const curVal = ls > 0
           ? ns.stock.getSaleGain(sym, ls, "Long")
           : (ss > 0 ? ns.stock.getSaleGain(sym, ss, "Short") : 0);
-        const spend = Math.min(avail, perStockBudget - curVal);
+        const spend = Math.min(avail, perStockCap - curVal);
         if (spend < 2e6) continue;
 
         if (f > BUY_LONG) {

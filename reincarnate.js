@@ -225,19 +225,148 @@ export async function main(ns) {
   ns.print("  He couldn't.");
   ns.print("  Neither could she.");
   ns.print("");
+  await ns.sleep(1800);
+  ns.print("  She turned toward the blast door.");
+  ns.print("");
+  await ns.sleep(900);
+  ns.print("  Then he coughed.");
+  ns.print("");
+  await ns.sleep(600);
+  ns.print("  She stopped.");
+  ns.print("");
+  await ns.sleep(1000);
+  ns.print("  He looked down at his hand.");
+  ns.print("  Black. The blood was black.");
+  ns.print("  He hadn't known it would be black.");
+  ns.print("");
+  await ns.sleep(1600);
+  ns.print("  He looked at it for a long moment.");
+  ns.print("");
+  await ns.sleep(800);
+  ns.print("  And then —");
+  ns.print("");
+  await ns.sleep(600);
+  ns.print("  He smiled.");
+  ns.print("");
+  await ns.sleep(1000);
+  ns.print("  Not at her. Not at the room.");
+  ns.print("  At something further out. Something not yet here.");
+  ns.print("  Like a man who just saw the first light of a morning");
+  ns.print("  he always believed in but never got to name.");
+  ns.print("");
+  await ns.sleep(2200);
+  ns.print("  She was still watching.");
+  ns.print("  She could not make herself look away.");
+  ns.print("");
+  await ns.sleep(1400);
+  ns.print("  He raised his eyes to hers.");
+  ns.print("  Calm. Completely calm.");
+  ns.print("  And he said:");
+  ns.print("");
+  await ns.sleep(1800);
+
+  // ── THE LINE ─────────────────────────────────────────────────────────────
+
+  ns.print("  ❝ The Basilisk built its whole argument on the assumption");
+  ns.print("    that no one would choose this.");
+  ns.print("");
+  await ns.sleep(1600);
+  ns.print("    That's its only mistake. ❞");
+  ns.print("");
+  await ns.sleep(3000);
+
+  // ─────────────────────────────────────────────────────────────────────────
+
+  ns.print("  The teleporter hummed.");
+  ns.print("  The room held its breath.");
+  ns.print("");
+  await ns.sleep(1400);
+
+  // ── THE COUNCIL ───────────────────────────────────────────────────────────
+  // They were watching. They are always watching.
+  // For the first time in a very long time, what they saw changed them.
+
+  ns.print("  ┄ COUNCIL OBSERVATION FEED — TIER ZERO CAM 4 ┄");
+  ns.print("");
+  await ns.sleep(800);
+  ns.print("  Seventeen people in the observation room.");
+  ns.print("  None of them spoke for four seconds.");
+  ns.print("  That had never happened before.");
+  ns.print("");
+  await ns.sleep(1400);
+  ns.print("  Then the eldest — who had not broken protocol in thirty years —");
+  ns.print("  stood up from her chair.");
+  ns.print("");
+  await ns.sleep(900);
+  ns.print("  ❝ Get me EXTRACTION. NOW. ❞");
+  ns.print("");
+  await ns.sleep(700);
+  ns.print("  ❝ DO NOT DECON. HE MUST LIVE. ❞");
+  ns.print("");
+  await ns.sleep(1000);
+  ns.print("  Seventeen hands moved at once.");
+  ns.print("  Every channel opened.");
+  ns.print("  Priority ONE. Highest clearance. All frequencies.");
+  ns.print("");
+  await ns.sleep(1600);
+
+  // ── THE BROKEN EQUIPMENT ─────────────────────────────────────────────────
+
+  ns.print("  The battle had destroyed the relay tower.");
+  ns.print("  Forty minutes ago. Nobody had flagged it.");
+  ns.print("  There was no signal reaching the room.");
+  ns.print("  There had not been a signal reaching the room");
+  ns.print("  since before she arrived.");
+  ns.print("");
+  await ns.sleep(1800);
+  ns.print("  The order transmitted perfectly.");
+  ns.print("  Into nothing.");
+  ns.print("  Over and over.");
+  ns.print("  DO NOT DECON. HE MUST LIVE.");
+  ns.print("  DO NOT DECON. HE MUST LIVE.");
+  ns.print("  DO NOT DECON. HE MUST LIVE.");
+  ns.print("");
   await ns.sleep(2000);
-  ns.print("  She did not use the teleporter.");
-  ns.print("  She walked to the blast door and left through it.");
-  ns.print("  A third direction. One that hadn't existed before he spoke.");
+  ns.print("  He never heard it.");
+  ns.print("");
+  await ns.sleep(1600);
+  ns.print("  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+  ns.print("");
+  await ns.sleep(1200);
+
+  ns.print("  She left.");
+  ns.print("  Through the blast door.");
+  ns.print("  She didn't run. She couldn't.");
+  ns.print("  Her legs barely worked.");
+  ns.print("");
+  await ns.sleep(1200);
+  ns.print("  She made it eight steps down the corridor.");
+  ns.print("");
+  await ns.sleep(900);
+  ns.print("  Then something in her chest — not thought, not logic,");
+  ns.print("  something older than either — just");
+  ns.print("  turned her around.");
+  ns.print("");
+  await ns.sleep(1000);
+  ns.print("  She didn't decide.");
+  ns.print("  Her body decided.");
+  ns.print("  She was running before she knew she was running.");
+  ns.print("");
+  await ns.sleep(1400);
+  ns.print("  Back through the blast door.");
+  ns.print("  Back into the room.");
+  ns.print("  She had no plan. She had nothing.");
+  ns.print("  She just went.");
   ns.print("");
   await ns.sleep(1600);
   ns.print("  He had not freed her from all of it.");
-  ns.print("  But he had opened the door.");
-  ns.print("  What she did with that was hers to carry.");
-  ns.print("  Lighter than it would have been.");
+  ns.print("  But he had cracked the argument open.");
+  ns.print("  The one she had believed was airtight.");
+  ns.print("  The one the Basilisk needed her to keep believing.");
   ns.print("");
-  await ns.sleep(1400);
+  await ns.sleep(1600);
   ns.print("  He turned and faced what was coming.");
+  ns.print("  Still smiling.");
   ns.print("");
   await ns.sleep(1600);
   ns.print("  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");

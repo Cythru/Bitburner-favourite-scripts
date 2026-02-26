@@ -887,15 +887,8 @@ export async function main(ns) {
     } catch { /* file doesn't exist yet — paper trader hasn't run */ }
 
     if (provenParams && provenParams.score.pnl > 0) {
-      // Paper-trader-proven parameters — these actually made money in testing
-      const p = provenParams.params;
-      CONFIG.forecastBuyLong  = p.forecastBuyLong;
-      CONFIG.forecastBuyShort = p.forecastBuyShort;
-      CONFIG.forecastSellLong = p.forecastSellLong;
-      CONFIG.forecastSellShort = p.forecastSellShort;
-      CONFIG.buyThreshold4S   = p.buyThreshold;
-      CONFIG.buyThresholdEst  = p.buyThreshold;
-      CONFIG.maxPortfolioPct  = p.maxPortfolioPct;
+      // Nudge CONFIG toward proven strategy (50% on startup — we have confidence in this data)
+      applyUpgrade(provenParams, 0.5);
     } else {
       // No proven strats available — use hardcoded conservative defaults
       // These are tighter than normal mode (higher confidence required)
@@ -934,6 +927,31 @@ export async function main(ns) {
     CONFIG.maxPortfolioPct   = SAFE_CONFIG.maxPortfolioPct;
   }
 
+  // Nudge CONFIG toward the winning paper strategy's params by `nudge` fraction (0–1).
+  // A nudge of 0.25 moves 25% of the way toward the winner each time it fires.
+  // Special logic upgrades (EST shorts, etc.) are toggled here based on theory results.
+  function applyUpgrade(winner, nudge = 0.25) {
+    const p = winner.params;
+    const lp = (a, b) => +(a + (b - a) * nudge).toFixed(5);
+    const prev = {
+      bl: CONFIG.forecastBuyLong, bs: CONFIG.forecastBuyShort,
+      thr: CONFIG.buyThresholdEst, pct: CONFIG.maxPortfolioPct,
+    };
+    CONFIG.forecastBuyLong   = lp(CONFIG.forecastBuyLong,   p.forecastBuyLong);
+    CONFIG.forecastBuyShort  = lp(CONFIG.forecastBuyShort,  p.forecastBuyShort);
+    CONFIG.forecastSellLong  = lp(CONFIG.forecastSellLong,  p.forecastSellLong);
+    CONFIG.forecastSellShort = lp(CONFIG.forecastSellShort, p.forecastSellShort);
+    CONFIG.buyThreshold4S    = lp(CONFIG.buyThreshold4S,    p.buyThreshold);
+    CONFIG.buyThresholdEst   = lp(CONFIG.buyThresholdEst,   p.buyThreshold);
+    CONFIG.maxPortfolioPct   = lp(CONFIG.maxPortfolioPct,   p.maxPortfolioPct);
+    // Logic toggle: ShortTheory graduation proves EST shorts are viable
+    if (winner.name === "ShortTheory" && winner.score.pnl > 0) {
+      estShortsEnabled = true;
+      upgradeLog.push(`+EST_SHORTS unlocked by ShortTheory`);
+    }
+    upgradeLog.push(`[${winner.name} ×${nudge}] BL:${prev.bl.toFixed(3)}→${CONFIG.forecastBuyLong.toFixed(3)} Thr:${prev.thr.toFixed(4)}→${CONFIG.buyThresholdEst.toFixed(4)}`);
+    if (upgradeLog.length > 4) upgradeLog.shift();
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 4: STATE
@@ -959,11 +977,15 @@ export async function main(ns) {
   const recentTrades   = [];     // last 5 closed trades for dashboard display
 
   // ── Safety net: auto-revert state ──
-  // Tracks rolling performance and reverts to SAFE_CONFIG if we're losing.
-  let consecutiveLosses = 0;     // resets to 0 on any win
-  const rollingWindow   = [];    // last 20 real trade P/Ls for rolling win-rate check
-  let safeModeActive    = false; // true while using SAFE_CONFIG fallback
-  let safeModeRevertTick = 0;    // tick when safe mode was last activated
+  let consecutiveLosses = 0;
+  const rollingWindow   = [];
+  let safeModeActive    = false;
+  let safeModeRevertTick = 0;
+
+  // ── Upgrade engine state ──
+  // Paper lab results nudge CONFIG rather than wholesale replacing it.
+  let   estShortsEnabled = false;   // ShortTheory graduation can unlock EST shorts
+  const upgradeLog       = [];      // rolling log of applied upgrades (shown in dashboard)
 
   // YOLO mode state — tracks the current single bet and win/loss record
   const yolo = {
@@ -1375,7 +1397,7 @@ export async function main(ns) {
       // then buy them back later at a lower price. If price goes UP, we lose.
       // Shorts only allowed with 4S data — without exact forecasts, direction
       // estimates are too noisy to short safely.
-      else if (r.forecast < CONFIG.forecastBuyShort && hasShorts && has4S) {
+      else if (r.forecast < CONFIG.forecastBuyShort && hasShorts && (has4S || estShortsEnabled)) {
         try {
           const price  = ns.stock.getBidPrice(r.sym);  // price we'd get selling
           const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.shortShares);
@@ -1729,6 +1751,13 @@ export async function main(ns) {
       ns.print(`║  Recovery check in: ${C.cyan(String(recoverIn))} ticks  (needs WR ≥ 55% over last 10)`);
     }
 
+    // ── Upgrade log ──
+    if (upgradeLog.length > 0) {
+      ns.print(`╠${LINE}╣`);
+      ns.print(`║ ${C.cyan(C.bold(" UPGRADES"))}${estShortsEnabled ? C.green("  EST shorts: ON") : ""}`);
+      for (const entry of upgradeLog) ns.print(`║  ${C.dim(entry)}`);
+    }
+
     // -- Trade statistics --
     ns.print(`╠${LINE}╣`);
     ns.print(`║ ${C.cyan(C.bold(" TRADES"))}`);
@@ -1869,14 +1898,7 @@ export async function main(ns) {
                 strats.sort((x, y) => y.score.pnl - x.score.pnl);
                 if (strats.length > 0 && strats[0].score.pnl > 0) {
                   provenParams = strats[0];
-                  const p = provenParams.params;
-                  CONFIG.forecastBuyLong   = p.forecastBuyLong;
-                  CONFIG.forecastBuyShort  = p.forecastBuyShort;
-                  CONFIG.forecastSellLong  = p.forecastSellLong;
-                  CONFIG.forecastSellShort = p.forecastSellShort;
-                  CONFIG.buyThreshold4S    = p.buyThreshold;
-                  CONFIG.buyThresholdEst   = p.buyThreshold;
-                  CONFIG.maxPortfolioPct   = p.maxPortfolioPct;
+                  applyUpgrade(provenParams, 0.25);
                 }
               }
             } catch { /* proven.txt unreadable — stay in safe mode */ }
@@ -2074,6 +2096,9 @@ export async function main(ns) {
         }).filter(Boolean);
         if (proven.length > 0) {
           await ns.write("/strats/proven.txt", JSON.stringify(proven, null, 2), "w");
+          // Upgrade main CONFIG based on the best graduating strategy (25% nudge).
+          proven.sort((a, b) => b.score.pnl - a.score.pnl);
+          applyUpgrade(proven[0], 0.25);
           // Export to disk via local HTTP so external tools can read results.
           try { await fetch("http://127.0.0.1:12526/proven", { method: "POST", body: JSON.stringify(proven) }); } catch { /* server not running — ignore */ }
         }

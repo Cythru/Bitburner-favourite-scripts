@@ -838,10 +838,12 @@ export async function main(ns) {
     MAX_DRAWDOWN_HALT:     0.20,  // drawdown fraction that halts new buys
 
     // ── Bid-ask spread filter ──
-    // Skip buying a stock if the spread eats more than spreadMaxFrac x the expected gain.
-    // Wide spreads mean you pay more to enter and receive less to exit — erodes edge fast.
-    // Example: ER=0.002, spread=0.008 -> spreadFrac/ER = 4 -> skip (above default 3.0).
-    spreadMaxFrac:         3.0,   // skip buy if spread fraction > ER * this value
+    // Skip buying a stock if the spread eats more than spreadMaxFrac × the per-tick ER.
+    // Spread is a ONE-TIME cost; ER compounds every tick. Breakeven hold = spread / (2×ER) ticks.
+    // Example: WDS spread=2.18%, ER=0.00496/tick → breakeven ~9 ticks → fine to buy.
+    // With typical Bitburner holds of 20-75 ticks, only reject if spread > ~25 ticks of ER.
+    // Old value of 3.0 was far too strict — it blocked nearly every trade by assuming 1-tick holds.
+    spreadMaxFrac:         50.0,  // skip buy only if spread > 50 ticks of ER (breakeven > 25 ticks)
 
     // ── Momentum blend (no-4S only) ──
     // When we don't have 4S data, nudge the estimated forecast with short-term price
@@ -1967,7 +1969,9 @@ export async function main(ns) {
           }
           port.positions[sym] = pp;
         }
-        // Buy phase
+        // Buy phase — 100% virtual, ZERO real money moved.
+        // Only reads prices (getAskPrice/getBidPrice). Never calls buyStock/buyShort.
+        // port.cash is a fake virtual bankroll — modifying it has no effect on real funds.
         if (port.cash >= 2e6) {
           let paperTW = port.cash;
           for (const sym of symbols) {

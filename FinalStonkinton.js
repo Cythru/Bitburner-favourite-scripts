@@ -898,6 +898,31 @@ export async function main(ns) {
     }
   }
 
+  // SAFE_CONFIG: locked-in conservative params used as a fallback when
+  // performance degrades. These values are intentionally restrictive —
+  // they require high confidence before entering any trade, and exit early.
+  // Revert logic in recordTrade() will snap CONFIG back to these if we
+  // hit 3 consecutive losses OR rolling win rate drops below 45%.
+  const SAFE_CONFIG = {
+    forecastBuyLong:   0.65,   // only buy long when 65%+ bullish
+    forecastBuyShort:  0.35,   // only short when 35%- bearish
+    forecastSellLong:  0.52,   // exit long sooner (don't ride reversals)
+    forecastSellShort: 0.48,   // exit short sooner
+    buyThreshold4S:    0.002,  // much higher bar for 4S edge
+    buyThresholdEst:   0.003,  // much higher bar for estimated edge
+    maxPortfolioPct:   0.20,   // max 20% exposure per stock
+  };
+
+  function applySafeConfig() {
+    CONFIG.forecastBuyLong   = SAFE_CONFIG.forecastBuyLong;
+    CONFIG.forecastBuyShort  = SAFE_CONFIG.forecastBuyShort;
+    CONFIG.forecastSellLong  = SAFE_CONFIG.forecastSellLong;
+    CONFIG.forecastSellShort = SAFE_CONFIG.forecastSellShort;
+    CONFIG.buyThreshold4S    = SAFE_CONFIG.buyThreshold4S;
+    CONFIG.buyThresholdEst   = SAFE_CONFIG.buyThresholdEst;
+    CONFIG.maxPortfolioPct   = SAFE_CONFIG.maxPortfolioPct;
+  }
+
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 4: STATE
@@ -921,6 +946,13 @@ export async function main(ns) {
   const sessionStart       = Date.now();  // for calculating elapsed time and $/min
   const worthHistory   = [];     // net worth samples for the sparkline graph (last 120)
   const recentTrades   = [];     // last 5 closed trades for dashboard display
+
+  // ── Safety net: auto-revert state ──
+  // Tracks rolling performance and reverts to SAFE_CONFIG if we're losing.
+  let consecutiveLosses = 0;     // resets to 0 on any win
+  const rollingWindow   = [];    // last 20 real trade P/Ls for rolling win-rate check
+  let safeModeActive    = false; // true while using SAFE_CONFIG fallback
+  let safeModeRevertTick = 0;    // tick when safe mode was last activated
 
   // YOLO mode state — tracks the current single bet and win/loss record
   const yolo = {
@@ -1104,11 +1136,32 @@ export async function main(ns) {
   // cost = entry cost of the position, used to compute % return per trade.
   function recordTrade(sym, type, pnl, tag = "", cost = 0) {
     totalProfit += pnl;
-    if (pnl >= 0) { totalWins++; totalWonAmt += pnl; }
-    else           { totalLosses++; totalLostAmt += Math.abs(pnl); }
+    if (pnl >= 0) { totalWins++; totalWonAmt += pnl; consecutiveLosses = 0; }
+    else           { totalLosses++; totalLostAmt += Math.abs(pnl); consecutiveLosses++; }
     recentTrades.push({ sym, type, pnl, tick: tickCount, tag, cost });
     if (recentTrades.length > 5) recentTrades.shift();  // keep last 5 for dashboard
     totalTradeCount++;
+
+    // ── Safety net: rolling window check ──
+    rollingWindow.push(pnl);
+    if (rollingWindow.length > 20) rollingWindow.shift();
+
+    // Trigger safe mode if:
+    //   a) 3 consecutive losses in a row, OR
+    //   b) rolling win rate dropped below 45% over last 10+ trades
+    if (!safeModeActive) {
+      const rollingWins = rollingWindow.filter(p => p >= 0).length;
+      const rollingWR   = rollingWindow.length > 0 ? rollingWins / rollingWindow.length : 1;
+      const tooManyLosses = consecutiveLosses >= 3;
+      const lowWinRate    = rollingWindow.length >= 10 && rollingWR < 0.45;
+
+      if (tooManyLosses || lowWinRate) {
+        applySafeConfig();
+        safeModeActive    = true;
+        safeModeRevertTick = tickCount;
+        provenParams      = null;  // stop using proven params until recovery confirmed
+      }
+    }
   }
 
 
@@ -1509,6 +1562,7 @@ export async function main(ns) {
     let modeColor = C.cyan;
     if (TURTLE) { modeStr = "TURTLE UP";          modeColor = C.green; }
     if (YOLO)   { modeStr = "GO BIG OR GO HOME";  modeColor = C.mag; }
+    if (safeModeActive) { modeStr = "⚠ SAFE MODE";  modeColor = C.yellow; }
 
     // ── Trend velocity (comparing recent vs older portion of sparkline) ──
     let velocityStr = "";
@@ -1650,6 +1704,18 @@ export async function main(ns) {
     ns.print(`║  Proj +1h:  ${C.plcol(proj1h - tw, ns.formatNumber(proj1h, 2).padStart(14))}  ${C.plcol(pct1h, (pct1h >= 0 ? "+" : "") + (pct1h * 100).toFixed(2) + "%")}`);
     ns.print(`║  Proj +24h: ${C.plcol(proj24h - tw, ns.formatNumber(proj24h, 2).padStart(14))}  ${C.plcol(pct24h, (pct24h >= 0 ? "+" : "") + (pct24h * 100).toFixed(2) + "%")}`);
 
+    // -- Safety net status --
+    if (safeModeActive) {
+      const rollingWins = rollingWindow.filter(p => p >= 0).length;
+      const rollingWR   = rollingWindow.length > 0 ? (rollingWins / rollingWindow.length * 100).toFixed(0) : "?";
+      const ticksSince  = tickCount - safeModeRevertTick;
+      const recoverIn   = Math.max(0, 50 - ticksSince);
+      ns.print(`╠${LINE}╣`);
+      ns.print(`║ ${C.yellow(C.bold(" ⚠ SAFE MODE"))} ${C.dim("— conservative params active")}`);
+      ns.print(`║  Trigger: ${consecutiveLosses >= 3 ? C.red("3 consecutive losses") : C.red("low rolling WR")}   Rolling WR: ${C.plcol(rollingWins / rollingWindow.length - 0.5, rollingWR + "%")}  (${rollingWindow.length} trades)`);
+      ns.print(`║  Recovery check in: ${C.cyan(String(recoverIn))} ticks  (needs WR ≥ 55% over last 10)`);
+    }
+
     // -- Trade statistics --
     ns.print(`╠${LINE}╣`);
     ns.print(`║ ${C.cyan(C.bold(" TRADES"))}`);
@@ -1767,6 +1833,40 @@ export async function main(ns) {
     if (tickCount % 50 === 0) {
       if (CONFIG.autoBuyAccess) tryBuyAccess(ns);
       ({ hasTIX, has4S } = checkAccess(ns));
+
+      // ── Safety net: attempt recovery from safe mode ──
+      // If we've been in safe mode for 50+ ticks AND the last 10 trades
+      // are looking healthy (WR >= 55%), re-enable the best known params.
+      if (safeModeActive && (tickCount - safeModeRevertTick) >= 50) {
+        const recent10  = rollingWindow.slice(-10);
+        const r10Wins   = recent10.filter(p => p >= 0).length;
+        const r10WR     = recent10.length >= 10 ? r10Wins / recent10.length : 0;
+        if (r10WR >= 0.55) {
+          // Performance has recovered — try loading proven params again
+          if (TURTLE) {
+            try {
+              const raw = ns.read("/strats/proven.txt");
+              if (raw && raw.length > 2) {
+                const strats = JSON.parse(raw);
+                strats.sort((x, y) => y.score.pnl - x.score.pnl);
+                if (strats.length > 0 && strats[0].score.pnl > 0) {
+                  provenParams = strats[0];
+                  const p = provenParams.params;
+                  CONFIG.forecastBuyLong   = p.forecastBuyLong;
+                  CONFIG.forecastBuyShort  = p.forecastBuyShort;
+                  CONFIG.forecastSellLong  = p.forecastSellLong;
+                  CONFIG.forecastSellShort = p.forecastSellShort;
+                  CONFIG.buyThreshold4S    = p.buyThreshold;
+                  CONFIG.buyThresholdEst   = p.buyThreshold;
+                  CONFIG.maxPortfolioPct   = p.maxPortfolioPct;
+                }
+              }
+            } catch { /* proven.txt unreadable — stay in safe mode */ }
+          }
+          consecutiveLosses  = 0;
+          safeModeActive     = false;
+        }
+      }
     }
 
     // ── Update all stock data ──

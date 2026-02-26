@@ -149,6 +149,19 @@ export async function main(ns) {
     // Skip new buys if portfolio has fallen >20% from its session peak.
     // Sells are unaffected — positions can still be exited normally.
     MAX_DRAWDOWN_HALT:     0.20,  // drawdown fraction that halts new buys
+
+    // ── Bid-ask spread filter ──
+    // Skip buying a stock if the spread eats more than spreadMaxFrac× the expected gain.
+    // Wide spreads mean you pay more to enter and receive less to exit — erodes edge fast.
+    // Example: ER=0.002, spread=0.008 → spreadFrac/ER = 4 → skip (above default 3.0).
+    spreadMaxFrac:         3.0,   // skip buy if spread fraction > ER × this value
+
+    // ── Momentum blend (no-4S only) ──
+    // When we don't have 4S data, nudge the estimated forecast with short-term price
+    // momentum. Positive momentum = recent prices rising faster than recent average.
+    // Capped via tanh so it never overrides the main forecast signal entirely.
+    momentumBlend:         0.04,  // max forecast nudge from momentum (±0.04 at most)
+    momentumWindow:        7,     // ticks per half-window for momentum calculation
   };
 
 
@@ -214,6 +227,10 @@ export async function main(ns) {
   let   totalTradeCount = 0;     // number of completed trades this session
   let   flatTicks          = 0;      // consecutive ticks with no meaningful market signal
   let   sessionPeakWorth   = 0;      // highest net worth seen this session (for drawdown halt)
+  let   totalWins          = 0;      // lifetime winning trades this session
+  let   totalLosses        = 0;      // lifetime losing trades this session
+  let   totalWonAmt        = 0;      // total $ won across all winning trades
+  let   totalLostAmt       = 0;      // total $ lost across all losing trades
   const sessionStart       = Date.now();  // for calculating elapsed time and $/min
   const worthHistory   = [];     // net worth samples for the sparkline graph (last 120)
   const recentTrades   = [];     // last 5 closed trades for dashboard display
@@ -285,6 +302,8 @@ export async function main(ns) {
       inversionFlag:   false,    // true when market cycle flip confirmed (2 ticks)
       inversionSince:  0,        // tickCount when raw inversion first detected (0 = none)
       inversionEarly:  false,    // true when flip is propagating (1-2 ticks before confirmed)
+      momentum:        0,        // short-term price momentum: +1 = surging up, -1 = crashing down
+      spreadFrac:      0,        // bid-ask spread as fraction of ask price (updated each tick)
     };
   }
 
@@ -316,6 +335,22 @@ export async function main(ns) {
     stock.estForecastShort = est.forecastShort;
     stock.inversionEarly   = est.inversionEarly ?? false;  // leading indicator
 
+    // ── Short-term price momentum ──
+    // Compare the mean of the last N ticks vs the N ticks before that.
+    // Positive = prices rising faster lately = bullish momentum.
+    // Used by expectedReturn() to nudge estimated forecast when we have no 4S data.
+    const ph  = stock.priceHistory;
+    const mW  = CONFIG.momentumWindow;
+    if (ph.length >= mW * 2) {
+      let oldSum = 0, newSum = 0;
+      for (let i = ph.length - mW * 2; i < ph.length - mW; i++) oldSum += ph[i];
+      for (let i = ph.length - mW;     i < ph.length;         i++) newSum += ph[i];
+      const oldAvg = oldSum / mW, newAvg = newSum / mW;
+      stock.momentum = oldAvg > 0 ? (newAvg - oldAvg) / oldAvg : 0;
+    } else {
+      stock.momentum = 0;
+    }
+
     // ── 2-tick inversion confirmation ──
     // rawInv fires on the first tick of disagreement.
     // We set inversionFlag=true only after it persists for ≥1 more tick.
@@ -332,14 +367,29 @@ export async function main(ns) {
 
   // THE key trading metric. Positive ER = expected profit, negative = expected loss.
   // With 4S: uses the game's exact forecast and volatility numbers.
-  // Without 4S: uses our estimated forecast + estimated volatility.
-  // Formula: ER = volatility * (forecast - 0.5)
-  //   If forecast = 0.6 and volatility = 0.02:
-  //   ER = 0.02 * 0.1 = 0.002 = 0.2% expected gain per tick
+  // Without 4S: uses our estimated forecast blended with short-term momentum,
+  //             plus estimated volatility from price history.
+  //
+  // Formula: ER = volatility × (forecast - 0.5)
+  //   Example: f=0.6, vol=0.02 → ER = 0.02 × 0.1 = 0.002 = 0.2% expected gain/tick
+  //
+  // Momentum blend (no-4S only):
+  //   We nudge `f` by tanh(momentum × 100) × momentumBlend.
+  //   tanh keeps the nudge bounded: never flips the forecast direction on its own.
+  //   Effectively: if forecast says bullish AND momentum confirms → stronger signal.
+  //   If forecast says bullish but momentum is negative → slightly weaker signal.
   function expectedReturn(stock) {
-    const f = has4S ? stock.forecast : stock.estForecast;
-    const v = has4S ? stock.volatility : estimateVolatility(stock.priceHistory);
-    return v * (f - 0.5);
+    if (has4S) {
+      const f = stock.forecast;
+      const v = stock.volatility;
+      return v * (f - 0.5);
+    }
+    // No 4S — use estimated forecast + momentum nudge
+    const f   = stock.estForecast;
+    const v   = estimateVolatility(stock.priceHistory);
+    const nudge = Math.tanh(stock.momentum * 100) * CONFIG.momentumBlend;
+    const adjF  = Math.max(0, Math.min(1, f + nudge));  // clamp to [0, 1]
+    return v * (adjF - 0.5);
   }
 
 
@@ -350,9 +400,12 @@ export async function main(ns) {
 
   // Called after every sell. Updates running totals and recent trade list.
   // Optional tag is stored on the trade for logging (e.g., " [EARLY]").
-  function recordTrade(sym, type, pnl, tag = "") {
+  // cost = entry cost of the position, used to compute % return per trade.
+  function recordTrade(sym, type, pnl, tag = "", cost = 0) {
     totalProfit += pnl;
-    recentTrades.push({ sym, type, pnl, tick: tickCount, tag });
+    if (pnl >= 0) { totalWins++; totalWonAmt += pnl; }
+    else           { totalLosses++; totalLostAmt += Math.abs(pnl); }
+    recentTrades.push({ sym, type, pnl, tick: tickCount, tag, cost });
     if (recentTrades.length > 5) recentTrades.shift();  // keep last 5 for dashboard
     totalTradeCount++;
   }
@@ -408,9 +461,10 @@ export async function main(ns) {
           const tag = (s.inversionEarly && f >= CONFIG.forecastSellLong && f < effectiveSellLong) ? " [EARLY]" : "";
           // Zero-trust: validate getSaleGain doesn't throw (can fail if position changed)
           try {
-            const pnl = ns.stock.getSaleGain(sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
+            const cost = s.longShares * s.longAvgPrice;
+            const pnl  = ns.stock.getSaleGain(sym, s.longShares, "Long") - cost;
             ns.stock.sellStock(sym, s.longShares);
-            recordTrade(sym, "L", pnl, tag);
+            recordTrade(sym, "L", pnl, tag, cost);
             s.longShares = 0; s.longAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
@@ -436,9 +490,10 @@ export async function main(ns) {
         if (f > effectiveSellShort || er > -sellThreshold || s.inversionFlag || stale || earlyProfit) {
           const tag = (s.inversionEarly && f <= CONFIG.forecastSellShort && f > effectiveSellShort) ? " [EARLY]" : "";
           try {
-            const pnl = ns.stock.getSaleGain(sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
+            const cost = s.shortShares * s.shortAvgPrice;
+            const pnl  = ns.stock.getSaleGain(sym, s.shortShares, "Short") - cost;
             ns.stock.sellShort(sym, s.shortShares);
-            recordTrade(sym, "S", pnl, tag);
+            recordTrade(sym, "S", pnl, tag, cost);
             s.shortShares = 0; s.shortAvgPrice = 0;  // clear immediately so buyPhase sees correct state
             s.ticksSinceAction = 0;
             s.positionOpenTick = 0;  // position closed — reset age tracker
@@ -525,6 +580,13 @@ export async function main(ns) {
       const budget = Math.min(avail, perStockCap - curLongVal - curShortVal);
       if (budget < 2e6) continue;
 
+      // ── Bid-ask spread filter ──
+      // Skip if the spread cost relative to expected gain is too high.
+      // The spread is paid twice (once on entry, once on exit), so it directly
+      // reduces realised profit. A spread of 0.002 on an ER of 0.001 means the
+      // spread alone would eat 2× our expected gain — not worth entering.
+      if (s.spreadFrac > Math.abs(r.er) * CONFIG.spreadMaxFrac) continue;
+
       // ── Buy long on bullish forecast ──
       if (r.forecast > CONFIG.forecastBuyLong) {
         const price  = ns.stock.getAskPrice(r.sym);  // price we'd pay to buy
@@ -591,18 +653,20 @@ export async function main(ns) {
       if (bet.type === "Short") shouldSell = f > 0.5 || s.shortShares === 0;
 
       if (shouldSell) {
-        let pnl = 0;
+        let pnl = 0, tradeCost = 0;
         if (bet.type === "Long" && s.longShares > 0) {
-          pnl = ns.stock.getSaleGain(bet.sym, s.longShares, "Long") - s.longShares * s.longAvgPrice;
+          tradeCost = s.longShares * s.longAvgPrice;
+          pnl = ns.stock.getSaleGain(bet.sym, s.longShares, "Long") - tradeCost;
           ns.stock.sellStock(bet.sym, s.longShares);
         } else if (bet.type === "Short" && s.shortShares > 0) {
           try {
-            pnl = ns.stock.getSaleGain(bet.sym, s.shortShares, "Short") - s.shortShares * s.shortAvgPrice;
+            tradeCost = s.shortShares * s.shortAvgPrice;
+            pnl = ns.stock.getSaleGain(bet.sym, s.shortShares, "Short") - tradeCost;
             ns.stock.sellShort(bet.sym, s.shortShares);
           } catch { hasShorts = false; }
         }
 
-        recordTrade(bet.sym, bet.type === "Long" ? "L" : "S", pnl);
+        recordTrade(bet.sym, bet.type === "Long" ? "L" : "S", pnl, "", tradeCost);
 
         // Update YOLO scoreboard
         if (pnl >= 0) {
@@ -764,7 +828,12 @@ export async function main(ns) {
     const modeLabel = `  FINAL STONKINTON  [ ${modeStr} ]`;
     ns.print(`║${C.bold("  FINAL STONKINTON")}  ${modeColor("[ " + modeStr + " ]")}`);
     ns.print(`╠${LINE}╣`);
-    ns.print(`║ ${has4S ? C.green("4S DATA") : C.yellow("ESTIMATED")} | Shorts: ${hasShorts ? C.green("ON") : C.red("OFF")} | Tick: ${C.cyan(String(tickCount))} | ${elapsed}min | ${C.dim(THEME)}`);
+    // Data tier indicator: shows exactly which market data sources are active
+    // ▓▓▓▓ = 4S+TIX (best — game forecasts+vol)  ▓▓▓░ = TIX+momentum  ▓▓░░ = TIX+est  ░░░░ = no data
+    const dataBar  = has4S ? C.green("▓▓▓▓ 4S+TIX") : C.yellow("▓▓░░ TIX+EST+MOMO");
+    const warmPct  = !has4S ? Math.min(100, Math.round(tickCount / 10 * 100)) : 100;
+    const warmStr  = !has4S && warmPct < 100 ? C.dim(` warmup:${warmPct}%`) : "";
+    ns.print(`║ DATA: ${dataBar}${warmStr} | Shorts: ${hasShorts ? C.green("ON") : C.red("OFF")} | Tick: ${C.cyan(String(tickCount))} | ${elapsed}min | ${C.dim(THEME)}`);
 
     // Show proven strategy info in turtle mode (so you know which params loaded)
     if (TURTLE && provenParams) {
@@ -834,12 +903,14 @@ export async function main(ns) {
       .sort((x, y) => y.pnl - x.pnl);  // best performers first
 
     for (const s of positions) {
-      const f   = (has4S ? s.forecast : s.estForecast).toFixed(3);
-      const v   = (has4S ? s.volatility : estimateVolatility(s.priceHistory)).toFixed(3);
-      const pos = s.longShares > 0 ? `L:${ns.formatNumber(s.longShares, 0)}` : `S:${ns.formatNumber(s.shortShares, 0)}`;
-      const inv = s.inversionFlag ? C.red("!") : " ";  // red "!" = cycle flip warning
+      const f      = (has4S ? s.forecast : s.estForecast).toFixed(3);
+      const v      = (has4S ? s.volatility : estimateVolatility(s.priceHistory)).toFixed(3);
+      const pos    = s.longShares > 0 ? `L:${ns.formatNumber(s.longShares, 0)}` : `S:${ns.formatNumber(s.shortShares, 0)}`;
+      const inv    = s.inversionFlag ? C.red("!") : (s.inversionEarly ? C.yellow("~") : " ");
+      const momo   = !has4S && Math.abs(s.momentum) > 0.001
+        ? (s.momentum > 0 ? C.green("↑") : C.red("↓")) : C.dim("·");
       const pnlStr = C.plcol(s.pnl, ((s.pnl >= 0 ? "+" : "") + ns.formatNumber(s.pnl, 0)).padStart(8));
-      ns.print(`║ ${(s.sym + inv).padEnd(6)} ║ ${f} ║ ${v} ║ ${pos.padEnd(10)} ║ ${pnlStr} ║ ${C.pct(s.ret)} ║`);
+      ns.print(`║ ${(s.sym + inv).padEnd(6)} ║ ${f} ║ ${v} ║ ${momo} ${pos.padEnd(9)} ║ ${pnlStr} ║ ${C.pct(s.ret)} ║`);
     }
 
     if (positions.length === 0) {
@@ -847,13 +918,66 @@ export async function main(ns) {
     }
     ns.print("╚════════╩═══════╩═══════╩════════════╩══════════╩═════════╝");
 
-    // ── Recent trades with win/loss ratio ──
+    // ── PROJECTIONS panel ──
+    // Dedicated section for forward-looking estimates, trade stats, and full trade history.
+    ns.print(`╠${LINE}╣`);
+    ns.print(`║ ${C.cyan(C.bold(" PROJECTIONS"))}`);
+    ns.print(`╠${LINE}╣`);
+
+    // -- Profit rate bars --
+    // Show /hr and /24h with a visual fill bar scaled to the best rate seen.
+    // Bar width = 20 chars; fill = rate / MAX_RATE_FOR_BAR (auto-scaled)
+    const BAR_W = 20;
+    const absRates = [Math.abs(ppm), Math.abs(pph), Math.abs(pp24)].filter(v => v > 0);
+    const maxRate  = absRates.length > 0 ? Math.max(...absRates) : 1;
+    function rateBar(rate) {
+      const fill = Math.round(Math.min(1, Math.abs(rate) / maxRate) * BAR_W);
+      const col  = rate >= 0 ? C.green : C.red;
+      return col("█".repeat(fill) + "░".repeat(BAR_W - fill));
+    }
+    ns.print(`║  /min  ${rateBar(ppm)}  ${C.plcol(ppm, (ppm >= 0 ? "+" : "") + ns.formatNumber(ppm, 2))}`);
+    ns.print(`║  /hr   ${rateBar(pph)}  ${C.plcol(pph, (pph >= 0 ? "+" : "") + ns.formatNumber(pph, 2))}`);
+    ns.print(`║  /24h  ${rateBar(pp24)} ${C.plcol(pp24, (pp24 >= 0 ? "+" : "") + ns.formatNumber(pp24, 2))}`);
+
+    // -- Portfolio projections --
+    // Estimated portfolio value at +1h and +24h based on current profit rate.
+    const proj1h  = tw + pph;
+    const proj24h = tw + pp24;
+    const pct1h   = tw > 0 ? (pph  / tw) : 0;
+    const pct24h  = tw > 0 ? (pp24 / tw) : 0;
+    ns.print(`║`);
+    ns.print(`║  Proj +1h:  ${C.plcol(proj1h - tw, ns.formatNumber(proj1h, 2).padStart(14))}  ${C.plcol(pct1h, (pct1h >= 0 ? "+" : "") + (pct1h * 100).toFixed(2) + "%")}`);
+    ns.print(`║  Proj +24h: ${C.plcol(proj24h - tw, ns.formatNumber(proj24h, 2).padStart(14))}  ${C.plcol(pct24h, (pct24h >= 0 ? "+" : "") + (pct24h * 100).toFixed(2) + "%")}`);
+
+    // -- Trade statistics --
+    ns.print(`╠${LINE}╣`);
+    ns.print(`║ ${C.cyan(C.bold(" TRADES"))}`);
+    const lifetimeWR  = totalWins + totalLosses > 0 ? totalWins / (totalWins + totalLosses) : 0;
+    const profitFactor = totalLostAmt > 0 ? totalWonAmt / totalLostAmt : (totalWonAmt > 0 ? Infinity : 0);
+    const avgTrade    = totalTradeCount > 0 ? totalProfit / totalTradeCount : 0;
+    const pfStr       = profitFactor === Infinity ? "∞" : profitFactor.toFixed(2) + "×";
+    ns.print(`║  Total: ${C.cyan(String(totalTradeCount))}   W: ${C.green(String(totalWins))}  L: ${C.red(String(totalLosses))}   WR: ${C.plcol(lifetimeWR - 0.5, (lifetimeWR * 100).toFixed(1) + "%")}   PF: ${C.plcol(profitFactor - 1, pfStr)}`);
+    ns.print(`║  Avg/trade: ${C.plcol(avgTrade, (avgTrade >= 0 ? "+" : "") + ns.formatNumber(avgTrade, 2))}   Won: ${C.green(ns.formatNumber(totalWonAmt, 2))}   Lost: ${C.red(ns.formatNumber(totalLostAmt, 2))}`);
+
+    // Win/loss ratio bar: shows proportion of wins vs losses visually
+    if (totalWins + totalLosses > 0) {
+      const wFill = Math.round(lifetimeWR * BAR_W);
+      const lFill = BAR_W - wFill;
+      ns.print(`║  ${C.green("W")} ${C.green("█".repeat(wFill) + "░".repeat(lFill))} ${C.red("L")}  ${C.green(ns.formatNumber(totalWonAmt, 2))} ${C.dim("vs")} ${C.red(ns.formatNumber(totalLostAmt, 2))}`);
+    }
+
+    // -- Last 5 trades (detailed) --
     if (recentTrades.length > 0) {
-      const ratio = wins + losses > 0 ? (wins / (wins + losses) * 100).toFixed(0) + "%" : "n/a";
-      ns.print(C.dim(` Recent (W:${C.green(String(wins))} L:${C.red(String(losses))} | ${ratio} | Total: ${totalTradeCount}):`));
+      ns.print(`╠${LINE}╣`);
+      ns.print(`║ ${C.cyan(C.bold(" LAST 5 TRADES"))}`);
       for (const t of [...recentTrades].reverse()) {
-        const pnlStr = C.plcol(t.pnl, ((t.pnl >= 0 ? "+" : "") + ns.formatNumber(t.pnl, 1)));
-        ns.print(`   ${t.type} ${t.sym.padEnd(5)} ${pnlStr}  ${C.dim("tick " + t.tick)}`);
+        const arrow  = t.pnl >= 0 ? C.green("▲") : C.red("▼");
+        const dir    = t.type === "L" ? "Long " : "Short";
+        const pnlStr = C.plcol(t.pnl, ((t.pnl >= 0 ? "+" : "") + ns.formatNumber(t.pnl, 2)).padStart(12));
+        const retPct = t.cost > 0 ? (t.pnl / t.cost * 100) : 0;
+        const retStr = C.plcol(t.pnl, (retPct >= 0 ? "+" : "") + retPct.toFixed(1) + "%");
+        const tagStr = t.tag ? C.yellow(t.tag.trim()) : "";
+        ns.print(`║  ${arrow} ${dir} ${t.sym.padEnd(5)} ${pnlStr}  ${retStr.padEnd(8)}  ${C.dim("T:" + String(t.tick))} ${tagStr}`);
       }
     }
 
@@ -872,7 +996,11 @@ export async function main(ns) {
           const dir    = o.f > 0.5 ? C.green("▲ LONG ") : C.red("▼ SHORT");
           const bar    = "█".repeat(Math.round(Math.abs(o.er) * 5000)).padEnd(8, "░");
           const erCol  = o.er > 0 ? C.green(o.er.toFixed(5)) : C.red(o.er.toFixed(5));
-          ns.print(`║  ${dir} ${o.sym.padEnd(5)}  F:${o.f.toFixed(3)}  ER:${erCol}  ${C.dim(bar)}`);
+          const momo   = !has4S
+            ? (o.stock.momentum > 0.001 ? C.green(" ↑") : o.stock.momentum < -0.001 ? C.red(" ↓") : C.dim(" ·"))
+            : "";
+          const sprd   = o.stock.spreadFrac > 0 ? C.dim(` spr:${(o.stock.spreadFrac * 100).toFixed(2)}%`) : "";
+          ns.print(`║  ${dir} ${o.sym.padEnd(5)}  F:${o.f.toFixed(3)}  ER:${erCol}  ${C.dim(bar)}${momo}${sprd}`);
         }
       }
     }
@@ -933,6 +1061,15 @@ export async function main(ns) {
         s.forecast   = ns.stock.getForecast(sym);
         s.volatility = ns.stock.getVolatility(sym);
       }
+
+      // Track bid-ask spread every tick (used in buyPhase spread filter).
+      // Spread = cost we pay beyond the fair price on entry + exit.
+      // Wide spreads erode edge; narrow spreads are cheap to trade.
+      try {
+        const ask = ns.stock.getAskPrice(sym);
+        const bid = ns.stock.getBidPrice(sym);
+        s.spreadFrac = ask > 0 ? (ask - bid) / ask : 0;
+      } catch { s.spreadFrac = 0; }
 
       s.ticksSinceAction++;
     }

@@ -760,6 +760,8 @@ export async function main(ns) {
     { name: "FastFlip",     forecastBuyLong: 0.58,  forecastBuyShort: 0.42, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0002,  maxPct: 0.30, shortWindow: 3  },
     { name: "DeepValue",    forecastBuyLong: 0.72,  forecastBuyShort: 0.28, forecastSellLong: 0.56, forecastSellShort: 0.44, buyThreshold: 0.004,   maxPct: 0.12, shortWindow: 10 },
     { name: "Balanced",     forecastBuyLong: 0.62,  forecastBuyShort: 0.38, forecastSellLong: 0.51, forecastSellShort: 0.49, buyThreshold: 0.0015,  maxPct: 0.28, shortWindow: 8  },
+    // ── Theory strategies ──
+    { name: "ShortTheory",  forecastBuyLong: 0.99,  forecastBuyShort: 0.42, forecastSellLong: 0.50, forecastSellShort: 0.52, buyThreshold: 0.0001,  maxPct: 0.34, shortWindow: 10, shortOnly: true },
   ];
   const PAPER_COMMISSION   = 100000;
   const PAPER_GRADUATE_TICKS = 300;
@@ -1802,8 +1804,8 @@ export async function main(ns) {
         }
         const pnl = pVal - port.startingCash;
         const isGrad = paperTickCount >= PAPER_GRADUATE_TICKS && pnl > 0 && wr >= PAPER_GRADUATE_WR;
-        // Tag: [S] = longs+shorts mixed slot, [S!] = short-only slot (EST mode)
-        const modeTag = !has4S && pidx === _sso ? "[S!]" : (!has4S && pidx === _ss ? "[S]" : "    ");
+        // Tag: [S!] = short-only, [S] = longs+shorts mixed rotation slot
+        const modeTag = port.strat.shortOnly ? "[S!]" : (!has4S && pidx === _ss ? "[S] " : "    ");
         return { name: port.strat.name, pnl, wr, total, isGrad, modeTag };
       }).sort((x, y) => y.pnl - x.pnl);
       for (const s of paperScored) {
@@ -2007,10 +2009,9 @@ export async function main(ns) {
           // shortsOnlySlot = NO longs, shorts only (pure short strategy test).
           const portIdx = paperPortfolios.indexOf(port);
           const nStrats = paperPortfolios.length;
-          const shortsSlot     = Math.floor(paperTickCount / 60) % nStrats;
-          const shortsOnlySlot = (shortsSlot + Math.floor(nStrats / 2)) % nStrats;
-          const isShortsMixed  = has4S || portIdx === shortsSlot;
-          const isShortOnly    = !has4S && portIdx === shortsOnlySlot;
+          const shortsSlot    = Math.floor(paperTickCount / 60) % nStrats;
+          const isShortOnly   = !!strat.shortOnly;  // ShortTheory: only ever shorts
+          const isShortsMixed = has4S || (!isShortOnly && portIdx === shortsSlot);
           const effectiveBuyLong  = has4S ? strat.forecastBuyLong  : Math.min(strat.forecastBuyLong,  0.62);
           const effectiveBuyShort = has4S ? strat.forecastBuyShort : Math.max(strat.forecastBuyShort, 0.38);
           for (const r of ranked) {

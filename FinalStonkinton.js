@@ -481,7 +481,7 @@ async function runPaperMode(ns) {
     }
 
     // Buy phase
-    if (port.cash < 2e6) return;
+    if (port.cash < 1e6) return;
     const tw = portfolioValue(port);
     const maxPerStock = tw * strat.maxPct;
 
@@ -497,11 +497,11 @@ async function runPaperMode(ns) {
     .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
 
     for (const r of ranked) {
-      if (port.cash < 2e6) break;
+      if (port.cash < 1e6) break;
       const p = getPosition(port, r.sym);
       const currentVal = p.longShares * ns.stock.getBidPrice(r.sym) + p.shortShares * ns.stock.getAskPrice(r.sym);
       const budget = Math.min(port.cash, maxPerStock - currentVal);
-      if (budget < 2e6) continue;
+      if (budget < 1e6) continue;
 
       if (r.f > strat.forecastBuyLong) {
         virtualBuy(port, r.sym, "Long", budget);
@@ -1316,7 +1316,7 @@ export async function main(ns) {
     let avail = spendable;  // remaining budget (decreases as we buy)
 
     for (const r of ranked) {
-      if (avail < 2e6) break;  // need at least $2m to make a meaningful purchase
+      if (avail < 1e6) break;  // need at least $1m to make a meaningful purchase
       const s = r.stock;
 
       // ── Kelly-adjacent position sizing ──
@@ -1334,7 +1334,7 @@ export async function main(ns) {
       const curLongVal  = s.longShares > 0  ? ns.stock.getSaleGain(s.sym, s.longShares, "Long")   : 0;
       const curShortVal = s.shortShares > 0 ? ns.stock.getSaleGain(s.sym, s.shortShares, "Short") : 0;
       const budget = Math.min(avail, perStockCap - curLongVal - curShortVal);
-      if (budget < 2e6) continue;
+      if (budget < 1e6) continue;
 
       // ── Bid-ask spread filter ──
       // Skip if the spread cost relative to expected gain is too high.
@@ -1448,7 +1448,7 @@ export async function main(ns) {
     // Bet 10% of net worth on the single highest-ER stock
     const tw      = totalWorth(ns);
     const betSize = tw * 0.10;
-    if (betSize < 2e6) return;  // too poor to bet meaningfully
+    if (betSize < 1e6) return;  // too poor to bet meaningfully
 
     // Find the best opportunity: highest |ER|, no inversion, no existing position
     const best = Object.values(stocks)
@@ -1972,7 +1972,7 @@ export async function main(ns) {
         // Buy phase — 100% virtual, ZERO real money moved.
         // Only reads prices (getAskPrice/getBidPrice). Never calls buyStock/buyShort.
         // port.cash is a fake virtual bankroll — modifying it has no effect on real funds.
-        if (port.cash >= 2e6) {
+        if (port.cash >= 1e6) {
           let paperTW = port.cash;
           for (const sym of symbols) {
             const pp = port.positions[sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
@@ -1987,10 +1987,10 @@ export async function main(ns) {
           }).filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
             .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
           for (const r of ranked) {
-            if (port.cash < 2e6) break;
+            if (port.cash < 1e6) break;
             const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
             const budget = Math.min(port.cash, paperTW * strat.maxPct);
-            if (budget < 2e6) continue;
+            if (budget < 1e6) continue;
             if (r.f > strat.forecastBuyLong) {
               const price = ns.stock.getAskPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.longShares);

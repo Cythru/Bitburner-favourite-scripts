@@ -1,4 +1,4 @@
-// Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--paper] [--theme classic|neon|matrix|ocean|fire]
+// Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--theme classic|neon|matrix|ocean|fire]
 //
 // All lib functions are inlined below — no external /lib/ files required.
 // Built-in fallbacks are kept as-is for reference but are no longer used by the main path.
@@ -6,8 +6,10 @@
 //   --turtle    conservative mode (high-confidence trades only)
 //   --yolo      single-bet gambling mode (10% per bet, 24min loss cooldown)
 //   --liquidate emergency sell-all and exit
-//   --paper     paper trading lab (simulate 6 strategies, no real money at risk)
 //   --theme     visual palette: classic | neon | matrix | ocean | fire
+//
+// Paper trading runs silently in the background during the normal trading loop.
+// A compact paper leaderboard is shown at the bottom of the dashboard.
 
 // ── Built-in fallbacks (kept as-is; not used when inlined libs are present) ──
 function _fbGetTheme(ns) { const i = ns.args.indexOf("--theme"); return { theme: null, name: i >= 0 ? String(ns.args[i+1]||"classic") : "classic" }; }
@@ -740,18 +742,23 @@ export async function main(ns) {
   // Open a tail window so the dashboard is visible
   ns.ui.openTail();
 
-  // ── Paper mode: delegate to runPaperMode and exit ──
-  if (ns.args.includes("--paper")) {
-    await runPaperMode(ns);
-    return;
-  }
-
-
   // ═══════════════════════════════════════════════════════════════
   // SECTION 1: MODE FLAGS + THEME
   // Parse command-line arguments to determine which mode to run.
   // Only one mode should be active at a time.
   // ═══════════════════════════════════════════════════════════════
+
+  const PAPER_STRATEGIES = [
+    { name: "Aggressive",   forecastBuyLong: 0.55,  forecastBuyShort: 0.45, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.00005, maxPct: 0.40, shortWindow: 10 },
+    { name: "Moderate",     forecastBuyLong: 0.575, forecastBuyShort: 0.425,forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0001,  maxPct: 0.34, shortWindow: 10 },
+    { name: "Conservative", forecastBuyLong: 0.60,  forecastBuyShort: 0.40, forecastSellLong: 0.51, forecastSellShort: 0.49, buyThreshold: 0.001,   maxPct: 0.25, shortWindow: 10 },
+    { name: "Turtle",       forecastBuyLong: 0.65,  forecastBuyShort: 0.35, forecastSellLong: 0.52, forecastSellShort: 0.48, buyThreshold: 0.002,   maxPct: 0.20, shortWindow: 10 },
+    { name: "Sniper",       forecastBuyLong: 0.70,  forecastBuyShort: 0.30, forecastSellLong: 0.55, forecastSellShort: 0.45, buyThreshold: 0.003,   maxPct: 0.15, shortWindow: 10 },
+    { name: "Momentum",     forecastBuyLong: 0.55,  forecastBuyShort: 0.45, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0001,  maxPct: 0.34, shortWindow: 5  },
+  ];
+  const PAPER_COMMISSION   = 100000;
+  const PAPER_GRADUATE_TICKS = 300;
+  const PAPER_GRADUATE_WR  = 0.57;
 
   const TURTLE    = ns.args.includes("--turtle");    // conservative mode
   const YOLO      = ns.args.includes("--yolo");       // single-bet gambling mode
@@ -986,6 +993,20 @@ export async function main(ns) {
       spreadFrac:      0,        // bid-ask spread as fraction of ask price (updated each tick)
     };
   }
+
+  // ── Paper trading state (runs silently alongside real trading) ──
+  const paperPortfolios = PAPER_STRATEGIES.map(s => ({
+    strat: s,
+    startingCash: 0,
+    cash: 0,
+    positions: {},
+    trades: [],
+    peakValue: 0,
+    maxDrawdown: 0,
+    returns: [],
+  }));
+  let paperInitialized = false;
+  let paperTickCount = 0;
 
 
   // ═══════════════════════════════════════════════════════════════
@@ -1684,6 +1705,34 @@ export async function main(ns) {
         }
       }
     }
+    // ── Paper Lab compact section ──
+    if (paperInitialized && paperPortfolios.length > 0) {
+      ns.print(`╠${LINE}╣`);
+      ns.print(`║ ${C.mag(C.bold(" PAPER LAB"))}  ${C.dim(`${paperTickCount}T / ${PAPER_GRADUATE_TICKS} to graduate`)}`);
+      const paperScored = paperPortfolios.map(port => {
+        const wins = port.trades.filter(t => t.pnl > 0).length;
+        const total = port.trades.length;
+        const wr = total > 0 ? wins / total : 0;
+        let pVal = port.cash;
+        for (const sym of symbols) {
+          const pp = port.positions[sym];
+          if (!pp) continue;
+          if (pp.longShares > 0) pVal += pp.longShares * ns.stock.getBidPrice(sym);
+          if (pp.shortShares > 0) pVal += pp.shortShares * (2 * pp.shortAvgPrice - ns.stock.getAskPrice(sym));
+        }
+        const pnl = pVal - port.startingCash;
+        const isGrad = paperTickCount >= PAPER_GRADUATE_TICKS && pnl > 0 && wr >= PAPER_GRADUATE_WR;
+        return { name: port.strat.name, pnl, wr, total, isGrad };
+      }).sort((x, y) => y.pnl - x.pnl);
+      for (const s of paperScored) {
+        const gradMark = s.isGrad ? C.green(" ★") : "  ";
+        const nameStr  = s.isGrad ? C.green(s.name.padEnd(12)) : C.dim(s.name.padEnd(12));
+        const pnlStr   = C.plcol(s.pnl, ns.formatNumber(s.pnl, 1).padStart(10));
+        const wrRaw    = (s.total > 0 ? (s.wr * 100).toFixed(1) + "%" : "n/a").padStart(6);
+        const wrStr    = s.total > 0 ? (s.wr >= PAPER_GRADUATE_WR ? C.green(wrRaw) : C.red(wrRaw)) : C.dim(wrRaw);
+        ns.print(`║  ${nameStr} ${pnlStr}  ${wrStr}  ${C.dim(String(s.total) + "T")}${gradMark}`);
+      }
+    }
     ns.print(`╚${LINE}╝`);
   }
 
@@ -1777,6 +1826,121 @@ export async function main(ns) {
 
     // Snapshot session data every 100 ticks (~10 minutes)
     if (tickCount % 100 === 0) doLogSession();
+
+    // ── Paper trading tick ──
+    // Initialize paper portfolios once we have starting cash
+    if (!paperInitialized && hasTIX) {
+      const startCash = ns.getServerMoneyAvailable("home");
+      for (const port of paperPortfolios) {
+        port.cash = startCash;
+        port.startingCash = startCash;
+        port.peakValue = startCash;
+      }
+      paperInitialized = true;
+    }
+    if (paperInitialized) {
+      paperTickCount++;
+      for (const port of paperPortfolios) {
+        const strat = port.strat;
+        // Sell phase
+        for (const sym of symbols) {
+          const s = stocks[sym];
+          const f = has4S ? s.forecast : s.estForecast;
+          const inv = s.inversionFlag;
+          const er = (has4S ? s.volatility : estimateVolatility(s.priceHistory)) * (f - 0.5);
+          const pp = port.positions[sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
+          if (pp.longShares > 0 && (f < strat.forecastSellLong || er < 0 || inv)) {
+            const exitPrice = ns.stock.getBidPrice(sym) * 0.997;
+            const pnl = pp.longShares * (exitPrice - pp.longAvgPrice) - 2 * PAPER_COMMISSION;
+            port.trades.push({ pnl, tick: paperTickCount });
+            port.cash += pp.longShares * exitPrice - PAPER_COMMISSION;
+            pp.longShares = 0; pp.longAvgPrice = 0;
+          }
+          if (pp.shortShares > 0 && (f > strat.forecastSellShort || er > 0 || inv)) {
+            const exitPrice = ns.stock.getAskPrice(sym) * 1.003;
+            const pnl = pp.shortShares * (pp.shortAvgPrice - exitPrice) - 2 * PAPER_COMMISSION;
+            port.trades.push({ pnl, tick: paperTickCount });
+            port.cash += pp.shortShares * (2 * pp.shortAvgPrice - exitPrice) - PAPER_COMMISSION;
+            pp.shortShares = 0; pp.shortAvgPrice = 0;
+          }
+          port.positions[sym] = pp;
+        }
+        // Buy phase
+        if (port.cash >= 2e6) {
+          let paperTW = port.cash;
+          for (const sym of symbols) {
+            const pp = port.positions[sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
+            if (pp.longShares > 0) paperTW += pp.longShares * ns.stock.getBidPrice(sym);
+            if (pp.shortShares > 0) paperTW += pp.shortShares * (2 * pp.shortAvgPrice - ns.stock.getAskPrice(sym));
+          }
+          const ranked = symbols.map(sym => {
+            const s = stocks[sym];
+            const f = has4S ? s.forecast : s.estForecast;
+            const er = (has4S ? s.volatility : estimateVolatility(s.priceHistory)) * (f - 0.5);
+            return { sym, f, er, inv: s.inversionFlag, maxShares: ns.stock.getMaxShares(sym) };
+          }).filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
+            .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
+          for (const r of ranked) {
+            if (port.cash < 2e6) break;
+            const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
+            const budget = Math.min(port.cash, paperTW * strat.maxPct);
+            if (budget < 2e6) continue;
+            if (r.f > strat.forecastBuyLong) {
+              const price = ns.stock.getAskPrice(r.sym);
+              const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.longShares);
+              if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {
+                const tot = pp.longShares + shares;
+                pp.longAvgPrice = (pp.longAvgPrice * pp.longShares + price * shares) / tot;
+                pp.longShares = tot;
+                port.cash -= shares * price + PAPER_COMMISSION;
+              }
+            } else if (r.f < strat.forecastBuyShort && has4S) {
+              const price = ns.stock.getBidPrice(r.sym);
+              const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.shortShares);
+              if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {
+                const tot = pp.shortShares + shares;
+                pp.shortAvgPrice = (pp.shortAvgPrice * pp.shortShares + price * shares) / tot;
+                pp.shortShares = tot;
+                port.cash -= shares * price + PAPER_COMMISSION;
+              }
+            }
+            port.positions[r.sym] = pp;
+          }
+        }
+        // Track drawdown
+        let pVal = port.cash;
+        for (const sym of symbols) {
+          const pp = port.positions[sym];
+          if (!pp) continue;
+          if (pp.longShares > 0) pVal += pp.longShares * ns.stock.getBidPrice(sym);
+          if (pp.shortShares > 0) pVal += pp.shortShares * (2 * pp.shortAvgPrice - ns.stock.getAskPrice(sym));
+        }
+        port.returns.push(pVal);
+        if (pVal > port.peakValue) port.peakValue = pVal;
+        const dd = pVal - port.peakValue;
+        if (dd < port.maxDrawdown) port.maxDrawdown = dd;
+      }
+      // Graduate check every 50 ticks after minimum
+      if (paperTickCount >= PAPER_GRADUATE_TICKS && paperTickCount % 50 === 0) {
+        const proven = paperPortfolios.map(port => {
+          const wins = port.trades.filter(t => t.pnl > 0).length;
+          const total = port.trades.length;
+          const wr = total > 0 ? wins / total : 0;
+          let pVal = port.cash;
+          for (const sym of symbols) {
+            const pp = port.positions[sym];
+            if (!pp) continue;
+            if (pp.longShares > 0) pVal += pp.longShares * ns.stock.getBidPrice(sym);
+          }
+          const pnl = pVal - port.startingCash;
+          if (pnl > 0 && wr >= PAPER_GRADUATE_WR) {
+            return { name: port.strat.name, params: { forecastBuyLong: port.strat.forecastBuyLong, forecastBuyShort: port.strat.forecastBuyShort, forecastSellLong: port.strat.forecastSellLong, forecastSellShort: port.strat.forecastSellShort, buyThreshold: port.strat.buyThreshold, maxPortfolioPct: port.strat.maxPct }, score: { pnl, winRate: wr, trades: total, maxDrawdown: port.maxDrawdown }, ticksTested: paperTickCount, graduatedAt: Date.now() };
+          }
+          return null;
+        }).filter(Boolean);
+        if (proven.length > 0) await ns.write("/strats/proven.txt", JSON.stringify(proven, null, 2), "w");
+      }
+    }
 
     // Redraw the dashboard
     printDashboard();

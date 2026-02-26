@@ -1,12 +1,29 @@
-// Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--theme classic|neon|matrix|ocean|fire]
+// Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--paper] [--theme classic|neon|matrix|ocean|fire]
 //
-// Self-contained build — all /lib/ functions are inlined directly.
-// No external files required. Trading behaviour is identical to the modular version.
+// All lib functions are inlined below — no external /lib/ files required.
+// Built-in fallbacks are kept as-is for reference but are no longer used by the main path.
+//
+//   --turtle    conservative mode (high-confidence trades only)
+//   --yolo      single-bet gambling mode (10% per bet, 24min loss cooldown)
+//   --liquidate emergency sell-all and exit
+//   --paper     paper trading lab (simulate 6 strategies, no real money at risk)
+//   --theme     visual palette: classic | neon | matrix | ocean | fire
 
-// ═══════════════════════════════════════════════════════════════
-// INLINED LIB: /lib/themes.js
-// ═══════════════════════════════════════════════════════════════
+// ── Built-in fallbacks (kept as-is; not used when inlined libs are present) ──
+function _fbGetTheme(ns) { const i = ns.args.indexOf("--theme"); return { theme: null, name: i >= 0 ? String(ns.args[i+1]||"classic") : "classic" }; }
+function _fbMakeColors() { const id = s => String(s); return { green:id,red:id,cyan:id,yellow:id,mag:id,dim:id,bold:id, pct:v=>(v>=0?"+":"")+(v*100).toFixed(1)+"%", plcol:(_,s)=>String(s) }; }
+function _fbTryBuyAccess(ns) { const m=ns.getServerMoneyAvailable("home"); try{if(m>200e6)ns.stock.purchaseWseAccount();}catch{} try{if(m>5e9)ns.stock.purchaseTixApi();}catch{} try{if(m>1e9)ns.stock.purchase4SMarketData();}catch{} try{if(m>25e9)ns.stock.purchase4SMarketDataTixApi();}catch{} }
+function _fbCheckAccess(ns) { let t=false,s=false; try{t=ns.stock.hasTIXAPIAccess();}catch{} try{s=ns.stock.has4SDataTIXAPI();}catch{} return{hasTIX:t,has4S:s}; }
+async function _fbWaitForTIX(ns) { while(true){_fbTryBuyAccess(ns);try{if(ns.stock.hasTIXAPIAccess())return _fbCheckAccess(ns);}catch{} ns.tprint("Waiting for TIX API...");await ns.sleep(30000);} }
+function _fbEstFc(h,lW,sW,iD){const n=h.length;if(n<3)return{forecast:0.5,forecastShort:0.5,inversionFlag:false};const lL=Math.min(lW,n-1),sL=Math.min(sW,n-1),lS=n-lL,sS=n-sL;let lU=0,sU=0;for(let i=lS;i<n;i++){if(h[i]>h[i-1]){lU++;if(i>=sS)sU++;}}const f=lU/lL,fs=sU/sL,x=(f>0.5)!==(fs>0.5);return{forecast:f,forecastShort:fs,inversionFlag:x&&Math.abs(f-fs)>iD};}
+function _fbEstVol(h){const n=h.length;if(n<2)return 0.01;const w=Math.min(20,n-1),s=n-w;let sum=0;for(let i=s;i<n;i++)sum+=Math.abs(h[i]-h[i-1])/h[i-1];return sum/w;}
+function _fbTotalWorth(ns){let w=ns.getServerMoneyAvailable("home");try{for(const s of ns.stock.getSymbols()){const[l,,sh]=ns.stock.getPosition(s);if(l>0)w+=ns.stock.getSaleGain(s,l,"Long");if(sh>0)w+=ns.stock.getSaleGain(s,sh,"Short");}}catch{}return w;}
+function _fbSparkline(data,width=40){if(data.length<2)return"─".repeat(width);let mn=data[0],mx=data[0];for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}const r=mx-mn||1,B="▁▂▃▄▅▆▇█";let o="";for(let i=0;i<width;i++){const idx=Math.min(data.length-1,Math.floor(i*(data.length-1)/Math.max(1,width-1)));o+=B[Math.min(7,Math.floor((data[idx]-mn)/r*8))];}return o;}
+function _fbLogTrade(ns,f,t,x=""){ns.write(f,`[T${t.tick}] ${t.type} ${t.sym} P/L:${t.pnl>=0?"+":""}${Math.round(t.pnl)}${x}\n`,"a");}
+function _fbLogSnap(ns,f,d){ns.write(f,JSON.stringify(d)+"\n","a");}
 
+// ── Inlined: lib/themes.js ──
+// ANSI color code map per theme.
 const _themes = {
   classic: { pos: "32",   neg: "31",   acc: "36",   hl: "35",   warn: "33"   },
   neon:    { pos: "95",   neg: "93",   acc: "96",   hl: "92",   warn: "91"   },
@@ -47,10 +64,7 @@ function makeColors(th) {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// INLINED LIB: /lib/market.js
-// ═══════════════════════════════════════════════════════════════
-
+// ── Inlined: lib/market.js ──
 function tryBuyAccess(ns) {
   const cash = ns.getServerMoneyAvailable("home");
   try {
@@ -58,7 +72,9 @@ function tryBuyAccess(ns) {
     if (!ns.stock.hasTIXAPIAccess() && cash > 5e9)    ns.stock.purchaseTixApi();
     if (!ns.stock.has4SData()       && cash > 1e9)    ns.stock.purchase4SMarketData();
     if (!ns.stock.has4SDataTIXAPI() && cash > 25e9)   ns.stock.purchase4SMarketDataTixApi();
-  } catch { /* stock market not yet unlocked — retry next tick */ }
+  } catch {
+    // Stock market APIs throw if player hasn't unlocked the stock market yet. Safe to ignore.
+  }
 }
 
 function checkAccess(ns) {
@@ -84,10 +100,7 @@ async function waitForTIX(ns) {
   return acc;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// INLINED LIB: /lib/estimate.js
-// ═══════════════════════════════════════════════════════════════
-
+// ── Inlined: lib/estimate.js ──
 function estimateForecast(history, longWindow, shortWindow, inversionDelta, volatility) {
   const len = history.length;
   if (len < 3) return { forecast: 0.5, forecastShort: 0.5, forecastMicro: 0.5, inversionFlag: false, inversionEarly: false };
@@ -164,10 +177,7 @@ function calcMomentum(history) {
   return score / (0.03 * 22.0);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// INLINED LIB: /lib/portfolio.js
-// ═══════════════════════════════════════════════════════════════
-
+// ── Inlined: lib/portfolio.js ──
 function totalWorth(ns) {
   let w = ns.getServerMoneyAvailable("home");
   for (const sym of ns.stock.getSymbols()) {
@@ -190,8 +200,8 @@ function sparkline(data, width) {
   }
   const range = max - min || 1;
   const chars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
-  const step  = Math.max(1, Math.floor(len / width));
-  let result  = "";
+  const step = Math.max(1, Math.floor(len / width));
+  let result = "";
   for (let i = 0; i < width; i++) {
     const bucketStart = i * step;
     if (bucketStart >= len) break;
@@ -206,10 +216,7 @@ function sparkline(data, width) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// INLINED LIB: /lib/logging.js
-// ═══════════════════════════════════════════════════════════════
-
+// ── Inlined: lib/logging.js ──
 function logTrade(ns, file, trade, extra = "", opts = {}) {
   const { entryPrice, exitPrice, er } = opts;
   let priceInfo = "";
@@ -225,22 +232,476 @@ function logSnapshot(ns, file, data) {
   ns.write(file, JSON.stringify(data) + "\n", "a");
 }
 
-// ═══════════════════════════════════════════════════════════════
-// BUILT-IN FALLBACKS (kept for completeness — never called in
-// this self-contained build because lib functions are always
-// available above)
-// ═══════════════════════════════════════════════════════════════
-function _fbGetTheme(ns) { const i = ns.args.indexOf("--theme"); return { theme: null, name: i >= 0 ? String(ns.args[i+1]||"classic") : "classic" }; }
-function _fbMakeColors() { const id = s => String(s); return { green:id,red:id,cyan:id,yellow:id,mag:id,dim:id,bold:id, pct:v=>(v>=0?"+":"")+(v*100).toFixed(1)+"%", plcol:(_,s)=>String(s) }; }
-function _fbTryBuyAccess(ns) { const m=ns.getServerMoneyAvailable("home"); try{if(m>200e6)ns.stock.purchaseWseAccount();}catch{} try{if(m>5e9)ns.stock.purchaseTixApi();}catch{} try{if(m>1e9)ns.stock.purchase4SMarketData();}catch{} try{if(m>25e9)ns.stock.purchase4SMarketDataTixApi();}catch{} }
-function _fbCheckAccess(ns) { let t=false,s=false; try{t=ns.stock.hasTIXAPIAccess();}catch{} try{s=ns.stock.has4SDataTIXAPI();}catch{} return{hasTIX:t,has4S:s}; }
-async function _fbWaitForTIX(ns) { while(true){_fbTryBuyAccess(ns);try{if(ns.stock.hasTIXAPIAccess())return _fbCheckAccess(ns);}catch{} ns.tprint("Waiting for TIX API...");await ns.sleep(30000);} }
-function _fbEstFc(h,lW,sW,iD){const n=h.length;if(n<3)return{forecast:0.5,forecastShort:0.5,inversionFlag:false};const lL=Math.min(lW,n-1),sL=Math.min(sW,n-1),lS=n-lL,sS=n-sL;let lU=0,sU=0;for(let i=lS;i<n;i++){if(h[i]>h[i-1]){lU++;if(i>=sS)sU++;}}const f=lU/lL,fs=sU/sL,x=(f>0.5)!==(fs>0.5);return{forecast:f,forecastShort:fs,inversionFlag:x&&Math.abs(f-fs)>iD};}
-function _fbEstVol(h){const n=h.length;if(n<2)return 0.01;const w=Math.min(20,n-1),s=n-w;let sum=0;for(let i=s;i<n;i++)sum+=Math.abs(h[i]-h[i-1])/h[i-1];return sum/w;}
-function _fbTotalWorth(ns){let w=ns.getServerMoneyAvailable("home");try{for(const s of ns.stock.getSymbols()){const[l,,sh]=ns.stock.getPosition(s);if(l>0)w+=ns.stock.getSaleGain(s,l,"Long");if(sh>0)w+=ns.stock.getSaleGain(s,sh,"Short");}}catch{}return w;}
-function _fbSparkline(data,width=40){if(data.length<2)return"─".repeat(width);let mn=data[0],mx=data[0];for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}const r=mx-mn||1,B="▁▂▃▄▅▆▇█";let o="";for(let i=0;i<width;i++){const idx=Math.min(data.length-1,Math.floor(i*(data.length-1)/Math.max(1,width-1)));o+=B[Math.min(7,Math.floor((data[idx]-mn)/r*8))];}return o;}
-function _fbLogTrade(ns,f,t,x=""){ns.write(f,`[T${t.tick}] ${t.type} ${t.sym} P/L:${t.pnl>=0?"+":""}${Math.round(t.pnl)}${x}\n`,"a");}
-function _fbLogSnap(ns,f,d){ns.write(f,JSON.stringify(d)+"\n","a");}
+
+// ════════════════════════════════════════════════════════════════
+// PAPER MODE — runPaperMode(ns)
+// Extracted from FinalStonkinton-paper.js.
+// Run with: run FinalStonkinton.js --paper
+// Simulates 6 strategies on live market data with no real trades.
+// Graduates winning strategies (>57% win rate) to /strats/proven.txt
+// ════════════════════════════════════════════════════════════════
+
+async function runPaperMode(ns) {
+  ns.disableLog("ALL");
+  ns.tail();
+
+  const COMMISSION = 100000;
+  const GRADUATE_TICKS = 300;  // more cycles = better statistical confidence
+  // +2% above raw 55% to compensate for bid/ask spread optimism in virtual P/L.
+  // Virtual sells use getBidPrice directly; real trades use getSaleGain() which
+  // accounts for the spread. Paper results are slightly better than real results.
+  const GRADUATE_WIN_RATE = 0.57;
+  const TICK_HISTORY = 80;
+
+  // Strategy variants to test in parallel
+  const STRATEGIES = [
+    {
+      name: "Aggressive",
+      forecastBuyLong: 0.55, forecastBuyShort: 0.45,
+      forecastSellLong: 0.50, forecastSellShort: 0.50,
+      buyThreshold: 0.00005, maxPct: 0.40,
+      shortWindow: 10,
+    },
+    {
+      name: "Moderate",
+      forecastBuyLong: 0.575, forecastBuyShort: 0.425,
+      forecastSellLong: 0.50, forecastSellShort: 0.50,
+      buyThreshold: 0.0001, maxPct: 0.34,
+      shortWindow: 10,
+    },
+    {
+      name: "Conservative",
+      forecastBuyLong: 0.60, forecastBuyShort: 0.40,
+      forecastSellLong: 0.51, forecastSellShort: 0.49,
+      buyThreshold: 0.001, maxPct: 0.25,
+      shortWindow: 10,
+    },
+    {
+      name: "Turtle",
+      forecastBuyLong: 0.65, forecastBuyShort: 0.35,
+      forecastSellLong: 0.52, forecastSellShort: 0.48,
+      buyThreshold: 0.002, maxPct: 0.20,
+      shortWindow: 10,
+    },
+    {
+      name: "Sniper",
+      forecastBuyLong: 0.70, forecastBuyShort: 0.30,
+      forecastSellLong: 0.55, forecastSellShort: 0.45,
+      buyThreshold: 0.003, maxPct: 0.15,
+      shortWindow: 10,
+    },
+    {
+      name: "Momentum",
+      forecastBuyLong: 0.55, forecastBuyShort: 0.45,
+      forecastSellLong: 0.50, forecastSellShort: 0.50,
+      buyThreshold: 0.0001, maxPct: 0.34,
+      shortWindow: 5,
+    },
+  ];
+
+  // Shared market state
+  let has4S = false;
+  let hasShorts = true;
+  let tickCount = 0;
+  const priceHistory = {};  // sym -> number[]
+  const marketData = {};    // sym -> { forecast, volatility, estForecast, maxShares }
+
+  // Per-strategy virtual portfolio
+  function createPortfolio(strat) {
+    return {
+      strat,
+      startingCash: 0,
+      cash: 0,
+      positions: {},    // sym -> { longShares, longAvgPrice, shortShares, shortAvgPrice }
+      trades: [],       // { sym, type, shares, entryPrice, exitPrice, pnl, tick }
+      peakValue: 0,
+      maxDrawdown: 0,
+      returns: [],      // per-tick portfolio value for Sharpe calc
+    };
+  }
+
+  const portfolios = STRATEGIES.map(s => createPortfolio(s));
+
+  function getPosition(port, sym) {
+    if (!port.positions[sym]) {
+      port.positions[sym] = { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
+    }
+    return port.positions[sym];
+  }
+
+  // Estimate forecast from price history (mirrors main trader logic)
+  function paperEstimateForecast(sym, shortWindow) {
+    const h = priceHistory[sym];
+    if (!h || h.length < 3) return { est: 0.5, estShort: 0.5, inversion: false };
+    const longLen = Math.min(76, h.length - 1);
+
+    // Weighted long-window forecast: matches lib/estimate.js (1.0 -> 2.0 weighting).
+    // Critical: paper trader must use the same algorithm as the real trader or
+    // graduation win rates are computed against a different signal — paper results
+    // won't transfer to live trading.
+    let longWeightedUps = 0, longWeightTotal = 0;
+    for (let i = h.length - longLen; i < h.length; i++) {
+      const pos = i - (h.length - longLen);
+      const w   = 1 + (longLen > 1 ? pos / (longLen - 1) : 0);
+      longWeightTotal += w;
+      if (h[i] > h[i - 1]) longWeightedUps += w;
+    }
+    const est = longWeightTotal > 0 ? longWeightedUps / longWeightTotal : 0.5;
+
+    const sLen = Math.min(shortWindow, h.length - 1);
+    let shortUps = 0;
+    for (let i = h.length - sLen; i < h.length; i++) {
+      if (h[i] > h[i - 1]) shortUps++;
+    }
+    const estShort = shortUps / sLen;
+    const delta = Math.abs(est - estShort);
+    const crossed = (est > 0.5 && estShort < 0.5) || (est < 0.5 && estShort > 0.5);
+    return { est, estShort, inversion: crossed && delta > 0.15 };
+  }
+
+  function paperEstimateVolatility(sym) {
+    const h = priceHistory[sym];
+    if (!h || h.length < 2) return 0.01;
+    const len = Math.min(20, h.length - 1);
+    let sum = 0;
+    for (let i = h.length - len; i < h.length; i++) {
+      sum += Math.abs(h[i] - h[i - 1]) / h[i - 1];
+    }
+    return sum / len;
+  }
+
+  function paperExpectedReturn(sym, forecast) {
+    const v = has4S ? marketData[sym].volatility : paperEstimateVolatility(sym);
+    return v * (forecast - 0.5);
+  }
+
+  // Virtual portfolio value
+  function portfolioValue(port) {
+    let val = port.cash;
+    for (const sym of Object.keys(port.positions)) {
+      const p = port.positions[sym];
+      const bid = ns.stock.getBidPrice(sym);
+      const ask = ns.stock.getAskPrice(sym);
+      // No commission deducted here — commission is only charged at sell time,
+      // not for holding. Subtracting it here double-counts it against every tick's value.
+      if (p.longShares > 0) val += p.longShares * bid;
+      if (p.shortShares > 0) val += p.shortShares * (2 * p.shortAvgPrice - ask);
+    }
+    return val;
+  }
+
+  // Virtual sell
+  // Apply 0.3% spread penalty to match getSaleGain() in the real trader.
+  // Raw getBidPrice/getAskPrice is optimistic — the real trader's getSaleGain()
+  // accounts for the bid/ask spread. Without this correction, paper results
+  // overstate win rates by ~0.5-1%, causing over-graduation.
+  function virtualSell(port, sym, type) {
+    const p = getPosition(port, sym);
+    if (type === "Long" && p.longShares > 0) {
+      const exitPrice = ns.stock.getBidPrice(sym) * 0.997;  // simulate spread
+      // Both commissions (buy + sell) counted so win/loss is accurate
+      const pnl = p.longShares * (exitPrice - p.longAvgPrice) - 2 * COMMISSION;
+      port.trades.push({ sym, type: "Long", shares: p.longShares, entryPrice: p.longAvgPrice, exitPrice, pnl, tick: tickCount });
+      port.cash += p.longShares * exitPrice - COMMISSION;
+      p.longShares = 0;
+      p.longAvgPrice = 0;
+    }
+    if (type === "Short" && p.shortShares > 0) {
+      const exitPrice = ns.stock.getAskPrice(sym) * 1.003;  // simulate spread
+      // Both commissions (buy + sell) counted so win/loss is accurate
+      const pnl = p.shortShares * (p.shortAvgPrice - exitPrice) - 2 * COMMISSION;
+      port.trades.push({ sym, type: "Short", shares: p.shortShares, entryPrice: p.shortAvgPrice, exitPrice, pnl, tick: tickCount });
+      port.cash += p.shortShares * (2 * p.shortAvgPrice - exitPrice) - COMMISSION;
+      p.shortShares = 0;
+      p.shortAvgPrice = 0;
+    }
+  }
+
+  // Virtual buy
+  function virtualBuy(port, sym, type, budget) {
+    const p = getPosition(port, sym);
+    if (type === "Long") {
+      const price = ns.stock.getAskPrice(sym);
+      const shares = Math.min(
+        Math.floor((budget - COMMISSION) / price),
+        marketData[sym].maxShares - p.longShares
+      );
+      if (shares > 0) {
+        const cost = shares * price + COMMISSION;
+        if (cost <= port.cash) {
+          const totalShares = p.longShares + shares;
+          p.longAvgPrice = (p.longAvgPrice * p.longShares + price * shares) / totalShares;
+          p.longShares = totalShares;
+          port.cash -= cost;
+        }
+      }
+    } else if (type === "Short") {
+      const price = ns.stock.getBidPrice(sym);
+      const shares = Math.min(
+        Math.floor((budget - COMMISSION) / price),
+        marketData[sym].maxShares - p.shortShares
+      );
+      if (shares > 0) {
+        const cost = shares * price + COMMISSION;
+        if (cost <= port.cash) {
+          const totalShares = p.shortShares + shares;
+          p.shortAvgPrice = (p.shortAvgPrice * p.shortShares + price * shares) / totalShares;
+          p.shortShares = totalShares;
+          port.cash -= cost;
+        }
+      }
+    }
+  }
+
+  // Run one tick of a strategy's trading logic
+  function runStrategy(port) {
+    const strat = port.strat;
+    const syms = Object.keys(marketData);
+
+    // Sell phase
+    for (const sym of syms) {
+      const p = getPosition(port, sym);
+      const fcData = has4S
+        ? { f: marketData[sym].forecast, inv: false }
+        : paperEstimateForecast(sym, strat.shortWindow);
+      const f = has4S ? fcData.f : fcData.est;
+      const inv = has4S ? false : fcData.inversion;
+      const er = paperExpectedReturn(sym, f);
+
+      if (p.longShares > 0 && (f < strat.forecastSellLong || er < 0 || inv)) {
+        virtualSell(port, sym, "Long");
+      }
+      if (p.shortShares > 0 && (f > strat.forecastSellShort || er > 0 || inv)) {
+        virtualSell(port, sym, "Short");
+      }
+    }
+
+    // Buy phase
+    if (port.cash < 2e6) return;
+    const tw = portfolioValue(port);
+    const maxPerStock = tw * strat.maxPct;
+
+    const ranked = syms.map(sym => {
+      const fcData = has4S
+        ? { f: marketData[sym].forecast, inv: false }
+        : paperEstimateForecast(sym, strat.shortWindow);
+      const f = has4S ? fcData.f : fcData.est;
+      const inv = has4S ? false : fcData.inversion;
+      return { sym, f, er: paperExpectedReturn(sym, f), inv };
+    })
+    .filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
+    .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
+
+    for (const r of ranked) {
+      if (port.cash < 2e6) break;
+      const p = getPosition(port, r.sym);
+      const currentVal = p.longShares * ns.stock.getBidPrice(r.sym) + p.shortShares * ns.stock.getAskPrice(r.sym);
+      const budget = Math.min(port.cash, maxPerStock - currentVal);
+      if (budget < 2e6) continue;
+
+      if (r.f > strat.forecastBuyLong) {
+        virtualBuy(port, r.sym, "Long", budget);
+      } else if (r.f < strat.forecastBuyShort && hasShorts) {
+        virtualBuy(port, r.sym, "Short", budget);
+      }
+    }
+  }
+
+  // Scoring
+  function scorePortfolio(port) {
+    const val = portfolioValue(port);
+    const pnl = val - port.startingCash;
+    const wins = port.trades.filter(t => t.pnl > 0).length;
+    const total = port.trades.length;
+    const winRate = total > 0 ? wins / total : 0;
+
+    // Sharpe-like: mean return / stddev of returns
+    let sharpe = 0;
+    if (port.returns.length > 2) {
+      const diffs = [];
+      for (let i = 1; i < port.returns.length; i++) {
+        diffs.push((port.returns[i] - port.returns[i - 1]) / port.returns[i - 1]);
+      }
+      const mean = diffs.reduce((acc, val) => acc + val, 0) / diffs.length;
+      const variance = diffs.reduce((acc, val) => acc + (val - mean) ** 2, 0) / diffs.length;
+      const std = Math.sqrt(variance);
+      sharpe = std > 0 ? mean / std : 0;
+    }
+
+    return { pnl, winRate, wins, total, maxDrawdown: port.maxDrawdown, sharpe, value: val };
+  }
+
+  // Graduate winning strategies to /strats/proven.txt
+  async function checkGraduation() {
+    const proven = [];
+    for (const port of portfolios) {
+      const score = scorePortfolio(port);
+      if (tickCount >= GRADUATE_TICKS && score.pnl > 0 && score.winRate >= GRADUATE_WIN_RATE) {
+        proven.push({
+          name: port.strat.name,
+          params: {
+            forecastBuyLong: port.strat.forecastBuyLong,
+            forecastBuyShort: port.strat.forecastBuyShort,
+            forecastSellLong: port.strat.forecastSellLong,
+            forecastSellShort: port.strat.forecastSellShort,
+            buyThreshold: port.strat.buyThreshold,
+            maxPortfolioPct: port.strat.maxPct,
+          },
+          score: {
+            pnl: score.pnl,
+            winRate: score.winRate,
+            trades: score.total,
+            maxDrawdown: score.maxDrawdown,
+            sharpe: score.sharpe,
+          },
+          ticksTested: tickCount,
+          graduatedAt: Date.now(),
+        });
+      }
+    }
+    if (proven.length > 0) {
+      await ns.write("/strats/proven.txt", JSON.stringify(proven, null, 2), "w");
+    }
+  }
+
+  // Dashboard
+  function printPaperDashboard() {
+    ns.clearLog();
+    ns.print("╔══════════════════════════════════════════════════════════════════╗");
+    ns.print("║              PAPER TRADING LAB - Strategy Tester                ║");
+    ns.print("║              No real money at risk - read-only mode             ║");
+    ns.print("╠══════════════════════════════════════════════════════════════════╣");
+    ns.print(`║ Tick: ${tickCount} / ${GRADUATE_TICKS} to graduate | Mode: ${has4S ? "4S DATA" : "ESTIMATED"} | Shorts: ${hasShorts ? "ON" : "OFF"}`);
+    ns.print("╠════════════════╦═════════════╦════════╦═════════╦══════╦═══════╣");
+    ns.print("║ Strategy       ║ P/L         ║ Win %  ║ Trades  ║ DD   ║ Sharp ║");
+    ns.print("╠════════════════╬═════════════╬════════╬═════════╬══════╬═══════╣");
+
+    const scoredPorts = portfolios.map(port => ({ port, score: scorePortfolio(port) }));
+    scoredPorts.sort((x, y) => y.score.pnl - x.score.pnl);
+
+    for (const { port, score } of scoredPorts) {
+      const name = port.strat.name.padEnd(14);
+      const pnl = ns.formatNumber(score.pnl, 1).padStart(11);
+      const wr = (score.total > 0 ? (score.winRate * 100).toFixed(1) + "%" : "  n/a").padStart(6);
+      const trades = String(score.total).padStart(7);
+      const dd = ns.formatNumber(score.maxDrawdown, 0).padStart(4);
+      const sh = score.sharpe.toFixed(2).padStart(5);
+      const graduated = (tickCount >= GRADUATE_TICKS && score.pnl > 0 && score.winRate >= GRADUATE_WIN_RATE) ? "*" : " ";
+      ns.print(`║ ${name}${graduated}║ ${pnl} ║ ${wr} ║ ${trades} ║ ${dd} ║ ${sh} ║`);
+    }
+
+    ns.print("╚════════════════╩═════════════╩════════╩═════════╩══════╩═══════╝");
+    if (tickCount >= GRADUATE_TICKS) {
+      const grads = scoredPorts.filter(s => s.score.pnl > 0 && s.score.winRate >= GRADUATE_WIN_RATE);
+      if (grads.length > 0) {
+        ns.print(` * = Graduated to /strats/proven.txt (${grads.length} strategies)`);
+      } else {
+        ns.print(` No strategies met graduation criteria yet (need +P/L and >${GRADUATE_WIN_RATE * 100}% win rate)`);
+      }
+    } else {
+      ns.print(` Collecting data... ${GRADUATE_TICKS - tickCount} ticks until graduation check`);
+    }
+
+    // Show top 5 virtual positions from the best-performing strategy
+    ns.print("");
+    ns.print(" Active Virtual Positions (best strategy):");
+    if (scoredPorts.length > 0) {
+      const best = scoredPorts[0].port;
+      const active = Object.entries(best.positions)
+        .filter(([, p]) => p.longShares > 0 || p.shortShares > 0)
+        .map(([sym, p]) => {
+          if (p.longShares > 0) {
+            const pnl = p.longShares * (ns.stock.getBidPrice(sym) - p.longAvgPrice);
+            return { sym, dir: "L", shares: p.longShares, pnl };
+          }
+          const pnl = p.shortShares * (p.shortAvgPrice - ns.stock.getAskPrice(sym));
+          return { sym, dir: "S", shares: p.shortShares, pnl };
+        })
+        .sort((x, y) => y.pnl - x.pnl)
+        .slice(0, 5);
+
+      for (const pos of active) {
+        const pnlStr = (pos.pnl >= 0 ? "+" : "") + ns.formatNumber(pos.pnl, 1);
+        ns.print(`   ${pos.dir} ${pos.sym.padEnd(5)} ${ns.formatNumber(pos.shares, 0).padStart(8)} shares  ${pnlStr}`);
+      }
+      if (active.length === 0) ns.print("   (none yet - waiting for signals)");
+    }
+  }
+
+  // ═══ INIT ═══
+  let hasTIX = false;
+  try { hasTIX = ns.stock.hasTIXAPIAccess(); } catch { /* TIX not available */ }
+  if (!hasTIX) {
+    ns.tprint("ERROR: Paper trader needs TIX API access to read market data.");
+    return;
+  }
+  try {
+    has4S = ns.stock.has4SDataTIXAPI();
+  } catch { has4S = false; }
+
+  const symbols = ns.stock.getSymbols();
+  for (const sym of symbols) {
+    priceHistory[sym] = [];
+    marketData[sym] = { forecast: 0.5, volatility: 0.01, estForecast: 0.5, maxShares: ns.stock.getMaxShares(sym) };
+  }
+
+  // Set starting cash for all portfolios to current player cash
+  const startCash = ns.getServerMoneyAvailable("home");
+  for (const port of portfolios) {
+    port.cash = startCash;
+    port.startingCash = startCash;
+    port.peakValue = startCash;
+  }
+
+  ns.print(`Paper Trading Lab initialized: ${symbols.length} stocks, ${STRATEGIES.length} strategies`);
+  ns.print(`Starting virtual cash: ${ns.formatNumber(startCash)} per strategy`);
+
+  // ═══ MAIN LOOP ═══
+  while (true) {
+    try {
+      await ns.stock.nextUpdate();
+    } catch {
+      await ns.sleep(6000);
+    }
+    tickCount++;
+
+    // Update shared market data
+    for (const sym of symbols) {
+      const price = ns.stock.getPrice(sym);
+      priceHistory[sym].push(price);
+      if (priceHistory[sym].length > TICK_HISTORY) priceHistory[sym].shift();
+
+      if (has4S) {
+        marketData[sym].forecast = ns.stock.getForecast(sym);
+        marketData[sym].volatility = ns.stock.getVolatility(sym);
+      }
+    }
+
+    // Run each strategy
+    for (const port of portfolios) {
+      runStrategy(port);
+
+      // Track portfolio value for drawdown and Sharpe
+      const val = portfolioValue(port);
+      port.returns.push(val);
+      if (val > port.peakValue) port.peakValue = val;
+      const dd = val - port.peakValue;
+      if (dd < port.maxDrawdown) port.maxDrawdown = dd;
+    }
+
+    // Graduate check every 50 ticks after minimum
+    if (tickCount >= GRADUATE_TICKS && tickCount % 50 === 0) {
+      await checkGraduation();
+    }
+
+    printPaperDashboard();
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ════════════════════════════════════════════════════════════════
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -262,8 +723,11 @@ export async function main(ns) {
   // Open a tail window so the dashboard is visible
   ns.ui.openTail();
 
-  // All lib functions are inlined above — no dynamic imports needed.
-  // Names are bound directly so the rest of the script is unchanged.
+  // ── Paper mode: delegate to runPaperMode and exit ──
+  if (ns.args.includes("--paper")) {
+    await runPaperMode(ns);
+    return;
+  }
 
 
   // ═══════════════════════════════════════════════════════════════
@@ -306,7 +770,7 @@ export async function main(ns) {
 
     // ── Sell thresholds ──
     // When to exit positions. Lower than buy thresholds = hysteresis
-    // (prevents buy→sell→buy oscillation on marginal signals)
+    // (prevents buy->sell->buy oscillation on marginal signals)
     forecastSellLong:  0.5,       // exit long when forecast drops to coin-flip
     forecastSellShort: 0.5,       // exit short when forecast rises to coin-flip
     sellThreshold4S:   0,         // any negative ER = exit (with 4S data)
@@ -334,12 +798,12 @@ export async function main(ns) {
     flatBuySkipTicks: 3,          // consecutive flat ticks required before skipping
 
     // ── Kelly-adjacent position sizing ──
-    // Per-stock allocation = |ER| / (vol² × KELLY_K), capped at maxPortfolioPct.
+    // Per-stock allocation = |ER| / (vol^2 * KELLY_K), capped at maxPortfolioPct.
     // High-vol stocks get smaller allocations; high-confidence signals get more.
     KELLY_K:               30,    // Kelly divisor — higher = smaller, more conservative bets
 
     // ── Early profit-taking ──
-    // Exit positions that are up ≥5% after 40+ ticks without waiting for neutral forecast.
+    // Exit positions that are up >=5% after 40+ ticks without waiting for neutral forecast.
     // Locks in gains that would likely evaporate over a full cycle.
     STALE_PROFIT_PCT:      0.05,  // minimum gain to trigger early exit (5%)
     STALE_MIN_TICKS_PROFIT: 40,   // minimum age before early profit exit applies
@@ -350,16 +814,16 @@ export async function main(ns) {
     MAX_DRAWDOWN_HALT:     0.20,  // drawdown fraction that halts new buys
 
     // ── Bid-ask spread filter ──
-    // Skip buying a stock if the spread eats more than spreadMaxFrac× the expected gain.
+    // Skip buying a stock if the spread eats more than spreadMaxFrac x the expected gain.
     // Wide spreads mean you pay more to enter and receive less to exit — erodes edge fast.
-    // Example: ER=0.002, spread=0.008 → spreadFrac/ER = 4 → skip (above default 3.0).
-    spreadMaxFrac:         3.0,   // skip buy if spread fraction > ER × this value
+    // Example: ER=0.002, spread=0.008 -> spreadFrac/ER = 4 -> skip (above default 3.0).
+    spreadMaxFrac:         3.0,   // skip buy if spread fraction > ER * this value
 
     // ── Momentum blend (no-4S only) ──
     // When we don't have 4S data, nudge the estimated forecast with short-term price
     // momentum. Positive momentum = recent prices rising faster than recent average.
     // Capped via tanh so it never overrides the main forecast signal entirely.
-    momentumBlend:         0.04,  // max forecast nudge from momentum (±0.04 at most)
+    momentumBlend:         0.04,  // max forecast nudge from momentum (+-0.04 at most)
     momentumWindow:        7,     // ticks per half-window for momentum calculation
   };
 
@@ -367,7 +831,7 @@ export async function main(ns) {
   // ═══════════════════════════════════════════════════════════════
   // SECTION 3: TURTLE MODE OVERRIDES
   // In turtle mode, we either load battle-tested parameters from
-  // the paper trader (FinalStonkinton-paper.js saves winners to
+  // the paper trader (run FinalStonkinton.js --paper saves winners to
   // /strats/proven.txt) or fall back to hardcoded conservative values.
   // ═══════════════════════════════════════════════════════════════
 
@@ -417,7 +881,7 @@ export async function main(ns) {
   // Everything here resets when the script restarts.
   // ═══════════════════════════════════════════════════════════════
 
-  const stocks         = {};     // sym → per-stock tracking object (initialized in Section 6)
+  const stocks         = {};     // sym -> per-stock tracking object (initialized in Section 6)
   let   has4S          = false;  // do we have 4S TIX API? (best data source)
   let   hasTIX         = false;  // do we have TIX API at all? (required to trade)
   let   hasShorts      = true;   // can we short? (fails gracefully if SF not unlocked)
@@ -523,7 +987,7 @@ export async function main(ns) {
   //
   // Inversion confirmation: raw inversionFlag from estimate.js is debounced
   // over 2 ticks to filter single-tick noise. stock.inversionFlag only
-  // becomes true after the raw signal persists for ≥1 additional tick.
+  // becomes true after the raw signal persists for >=1 additional tick.
   function runEstimation(stock) {
     // Pass estimated volatility to enable adaptive inversion delta.
     // Uses previous-tick vol (ok: estimate.js vol is smooth, single-tick lag negligible).
@@ -552,7 +1016,7 @@ export async function main(ns) {
 
     // ── 2-tick inversion confirmation ──
     // rawInv fires on the first tick of disagreement.
-    // We set inversionFlag=true only after it persists for ≥1 more tick.
+    // We set inversionFlag=true only after it persists for >=1 more tick.
     // This prevents 1-tick noise spikes from triggering hard exits.
     const rawInv = est.inversionFlag;
     if (rawInv) {
@@ -569,14 +1033,14 @@ export async function main(ns) {
   // Without 4S: uses our estimated forecast blended with short-term momentum,
   //             plus estimated volatility from price history.
   //
-  // Formula: ER = volatility × (forecast - 0.5)
-  //   Example: f=0.6, vol=0.02 → ER = 0.02 × 0.1 = 0.002 = 0.2% expected gain/tick
+  // Formula: ER = volatility * (forecast - 0.5)
+  //   Example: f=0.6, vol=0.02 -> ER = 0.02 * 0.1 = 0.002 = 0.2% expected gain/tick
   //
   // Momentum blend (no-4S only):
-  //   We nudge `f` by tanh(momentum × 100) × momentumBlend.
+  //   We nudge `f` by tanh(momentum * 100) * momentumBlend.
   //   tanh keeps the nudge bounded: never flips the forecast direction on its own.
-  //   Effectively: if forecast says bullish AND momentum confirms → stronger signal.
-  //   If forecast says bullish but momentum is negative → slightly weaker signal.
+  //   Effectively: if forecast says bullish AND momentum confirms -> stronger signal.
+  //   If forecast says bullish but momentum is negative -> slightly weaker signal.
   function expectedReturn(stock) {
     if (has4S) {
       const f = stock.forecast;
@@ -645,7 +1109,7 @@ export async function main(ns) {
         // inversionEarly tightens the sell threshold by 0.01 (exit 1-2 ticks before confirmed flip)
         const effectiveSellLong = CONFIG.forecastSellLong + (s.inversionEarly ? 0.01 : 0);
 
-        // Early profit exit: if up ≥5% after 40+ ticks, take the gain now
+        // Early profit exit: if up >=5% after 40+ ticks, take the gain now
         let earlyProfit = false;
         if (age > CONFIG.STALE_MIN_TICKS_PROFIT) {
           try {
@@ -763,7 +1227,7 @@ export async function main(ns) {
       const s = r.stock;
 
       // ── Kelly-adjacent position sizing ──
-      // Fraction = |ER| / (vol² × KELLY_K), capped at maxPortfolioPct.
+      // Fraction = |ER| / (vol^2 * KELLY_K), capped at maxPortfolioPct.
       // High-vol stocks get smaller allocations (more risk per $ invested).
       // High-ER signals get more capital (stronger edge = larger bet justified).
       const vol        = has4S ? s.volatility : estimateVolatility(s.priceHistory);
@@ -783,7 +1247,7 @@ export async function main(ns) {
       // Skip if the spread cost relative to expected gain is too high.
       // The spread is paid twice (once on entry, once on exit), so it directly
       // reduces realised profit. A spread of 0.002 on an ER of 0.001 means the
-      // spread alone would eat 2× our expected gain — not worth entering.
+      // spread alone would eat 2x our expected gain — not worth entering.
       if (s.spreadFrac > Math.abs(r.er) * CONFIG.spreadMaxFrac) continue;
 
       // ── Buy long on bullish forecast ──
@@ -995,7 +1459,7 @@ export async function main(ns) {
     const wins     = recentTrades.filter(t => t.pnl >= 0).length;
     const losses   = recentTrades.filter(t => t.pnl < 0).length;
 
-    // Track net worth for sparkline graph (max 120 samples = 120 ticks ≈ 12min)
+    // Track net worth for sparkline graph (max 120 samples = 120 ticks ~= 12min)
     worthHistory.push(tw);
     if (worthHistory.length > 120) worthHistory.shift();
 

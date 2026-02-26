@@ -1102,8 +1102,15 @@ export async function main(ns) {
     // Each tick: ema = ema * (1 - α) + increased * α
     // Long EMA (α≈0.013, ~76-tick effective window): tracks sustained trend.
     // Short EMA (α≈0.182, ~10-tick effective window): tracks recent momentum.
-    // Smoother than hard-window _fbEstFc — no cliff when old ticks fall out.
+    // Bootstrap from _fbEstFc on first meaningful tick so EMA starts at a
+    // real value instead of 0.5 — prevents sellPhase dumping all inherited
+    // positions on restart because ER ≈ 0 < sellThreshold.
     if (ph.length >= 2) {
+      if (stock.emaLong === 0.5 && ph.length >= CONFIG.shortWindow) {
+        const boot = _fbEstFc(ph, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta);
+        stock.emaLong  = boot.forecast;
+        stock.emaShort = boot.forecastShort;
+      }
       const increased = ph[ph.length - 1] > ph[ph.length - 2] ? 1 : 0;
       stock.emaLong  = stock.emaLong  * (1 - CONFIG.emaAlphaLong)  + increased * CONFIG.emaAlphaLong;
       stock.emaShort = stock.emaShort * (1 - CONFIG.emaAlphaShort) + increased * CONFIG.emaAlphaShort;
@@ -2029,18 +2036,18 @@ export async function main(ns) {
             return { sym, f, er, inv: s.inversionFlag, maxShares: ns.stock.getMaxShares(sym) };
           }).filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
             .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
-          // In EST mode: cap forecastBuyLong at 0.62 so high-threshold
-          // strategies (Turtle 0.65, Sniper 0.70) can still get test trades.
-          // Rotate 2 shorts slots every 60 ticks so every strategy cycles
-          // through shorts exposure. shortsSlot = longs+shorts mixed.
-          // shortsOnlySlot = NO longs, shorts only (pure short strategy test).
+          // In EST mode: compress thresholds 40% toward 0.5 so strategies
+          // still differentiate each other but are reachable by the EMA.
+          // e.g. Turtle 0.65 → 0.59, Sniper 0.70 → 0.62, Aggressive 0.55 → 0.53
+          // (With 4S: use full thresholds as designed.)
           const portIdx = paperPortfolios.indexOf(port);
           const nStrats = paperPortfolios.length;
           const shortsSlot    = Math.floor(paperTickCount / 60) % nStrats;
-          const isShortOnly   = !!strat.shortOnly;  // ShortTheory: only ever shorts
+          const isShortOnly   = !!strat.shortOnly;
           const isShortsMixed = has4S || (!isShortOnly && portIdx === shortsSlot);
-          const effectiveBuyLong  = has4S ? strat.forecastBuyLong  : Math.min(strat.forecastBuyLong,  0.62);
-          const effectiveBuyShort = has4S ? strat.forecastBuyShort : Math.max(strat.forecastBuyShort, 0.38);
+          const sf = has4S ? 1.0 : 0.6;  // scale factor: compress 40% toward 0.5 in EST mode
+          const effectiveBuyLong  = 0.5 + (strat.forecastBuyLong  - 0.5) * sf;
+          const effectiveBuyShort = 0.5 - (0.5 - strat.forecastBuyShort) * sf;
           for (const r of ranked) {
             if (port.cash < 2e5) break;
             const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };

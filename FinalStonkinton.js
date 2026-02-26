@@ -1162,11 +1162,18 @@ export async function main(ns) {
       const v = stock.volatility;
       return v * (f - 0.5);
     }
-    // No 4S — use estimated forecast + momentum nudge
-    const f   = stock.estForecast;
-    const v   = estimateVolatility(stock.priceHistory);
+    // No 4S — use estimated forecast + momentum nudge + conservative adjustment.
+    // From stockmaster: reduce probability by 1 std dev toward 0.5 to account
+    // for estimation error. stdDev = sqrt(p*(1-p)/windowLen).
+    // This correctly kills marginal signals (f=0.55 → adjF≈0.49 = no trade)
+    // while preserving strong signals (f=0.70 → adjF≈0.64 = still enters).
+    const f    = stock.estForecast;
+    const v    = estimateVolatility(stock.priceHistory);
+    const wLen = Math.max(1, Math.round(1 / CONFIG.emaAlphaLong));  // effective EMA window
+    const stdDev = Math.sqrt(f * (1 - f) / wLen);
+    const conservF = f > 0.5 ? Math.max(0.5, f - stdDev) : Math.min(0.5, f + stdDev);
     const nudge = Math.tanh(stock.momentum * 100) * CONFIG.momentumBlend;
-    const adjF  = Math.max(0, Math.min(1, f + nudge));  // clamp to [0, 1]
+    const adjF  = Math.max(0, Math.min(1, conservF + nudge));
     return v * (adjF - 0.5);
   }
 
@@ -1344,7 +1351,10 @@ export async function main(ns) {
     const spendable    = Math.min(cash, tw * CONFIG.maxDeploy - invested);  // respect 80% cap
     if (spendable < 1e6) return;
 
-    // Rank all stocks by absolute expected return (strongest signal first)
+    // Rank all stocks by timeToCoverTheSpread (from stockmaster by alainbryden)
+    // = ticks needed for expected price movement to recover the bid-ask spread cost
+    // = log(ask/bid) / log(1 + |ER|)   [ask/bid = 1/(1-spreadFrac)]
+    // Lower = better: prioritises high-ER + tight-spread stocks over raw ER alone.
     // Filter out: weak signals (below threshold) and inverting stocks (mid-flip)
     const ranked = Object.values(stocks)
       .map(s => ({
@@ -1354,7 +1364,15 @@ export async function main(ns) {
         stock:    s,
       }))
       .filter(r => Math.abs(r.er) > buyThreshold && !r.stock.inversionFlag)
-      .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
+      .map(r => {
+        const absER = Math.abs(r.er);
+        const sf    = r.stock.spreadFrac;
+        const ttcs  = absER > 0 && sf < 1
+          ? Math.log(1 / (1 - sf)) / Math.log(1 + absER)
+          : Infinity;
+        return { ...r, ttcs };
+      })
+      .sort((x, y) => x.ttcs - y.ttcs);  // ascending: fastest spread recovery first
 
     let avail = spendable;  // remaining budget (decreases as we buy)
 

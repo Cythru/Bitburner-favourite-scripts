@@ -1366,7 +1366,9 @@ export async function main(ns) {
       // ── Short on bearish forecast ──
       // Shorting profits when price drops. We "borrow" shares and sell them,
       // then buy them back later at a lower price. If price goes UP, we lose.
-      else if (r.forecast < CONFIG.forecastBuyShort && hasShorts) {
+      // Shorts only allowed with 4S data — without exact forecasts, direction
+      // estimates are too noisy to short safely.
+      else if (r.forecast < CONFIG.forecastBuyShort && hasShorts && has4S) {
         try {
           const price  = ns.stock.getBidPrice(r.sym);  // price we'd get selling
           const shares = Math.min(Math.floor((budget - CONFIG.commission) / price), s.maxShares - s.shortShares);
@@ -1907,8 +1909,10 @@ export async function main(ns) {
       s.ticksSinceAction++;
     }
 
-    // Need ~10 ticks of price data before estimates are usable
-    if (!has4S && tickCount < 10) { printDashboard(); continue; }
+    // Need ~30 ticks of price data before estimates are usable.
+    // _fbEstFc uses Math.min(longWindow, n-1) — at tick 10, the "76-tick window"
+    // is actually just 9 data points, producing unreliable forecasts.
+    if (!has4S && tickCount < 30) { printDashboard(); continue; }
 
     // ── Execute trades ──
     const tradesBefore = totalTradeCount;

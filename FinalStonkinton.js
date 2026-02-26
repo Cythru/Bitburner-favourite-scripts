@@ -1,14 +1,235 @@
 // Usage: run FinalStonkinton.js [--turtle] [--yolo] [--liquidate] [--theme classic|neon|matrix|ocean|fire]
 //
-// Shared libraries loaded dynamically with fallbacks (see /lib/ for full docs):
-//   themes.js   — color palettes and ANSI helpers
-//   market.js   — auto-purchase WSE/TIX/4S access
-//   estimate.js — price-history-based forecast estimation
-//   portfolio.js — net worth calc and sparkline graphs
-//   logging.js  — trade log and session snapshots
-// All lib files are optional — if missing, built-in fallbacks activate automatically.
+// Self-contained build — all /lib/ functions are inlined directly.
+// No external files required. Trading behaviour is identical to the modular version.
 
-// ── Built-in fallbacks (active when /lib/ files are absent) ──
+// ═══════════════════════════════════════════════════════════════
+// INLINED LIB: /lib/themes.js
+// ═══════════════════════════════════════════════════════════════
+
+const _themes = {
+  classic: { pos: "32",   neg: "31",   acc: "36",   hl: "35",   warn: "33"   },
+  neon:    { pos: "95",   neg: "93",   acc: "96",   hl: "92",   warn: "91"   },
+  matrix:  { pos: "1;92", neg: "2;32", acc: "32",   hl: "92",   warn: "1;33" },
+  ocean:   { pos: "96",   neg: "91",   acc: "94",   hl: "97",   warn: "93"   },
+  fire:    { pos: "1;33", neg: "31",   acc: "91",   hl: "93",   warn: "35"   },
+};
+
+function getTheme(ns) {
+  const idx = ns.args.indexOf("--theme");
+  const name = idx >= 0 && ns.args[idx + 1]
+    ? String(ns.args[idx + 1]).toLowerCase()
+    : "classic";
+  const matched = _themes[name];
+  return { theme: matched || _themes.classic, name: matched ? name : "classic" };
+}
+
+function makeColors(th) {
+  const posPrefix  = `\x1b[${th.pos}m`;
+  const negPrefix  = `\x1b[${th.neg}m`;
+  const accPrefix  = `\x1b[${th.acc}m`;
+  const hlPrefix   = `\x1b[${th.hl}m`;
+  const warnPrefix = `\x1b[${th.warn}m`;
+  const reset      = "\x1b[0m";
+  return {
+    green:  (s) => posPrefix + s + reset,
+    red:    (s) => negPrefix + s + reset,
+    cyan:   (s) => accPrefix + s + reset,
+    mag:    (s) => hlPrefix + s + reset,
+    yellow: (s) => warnPrefix + s + reset,
+    bold:   (s) => "\x1b[1m" + s + reset,
+    dim:    (s) => "\x1b[2m" + s + reset,
+    plcol:  (v, s) => (v >= 0 ? posPrefix : negPrefix) + s + reset,
+    pct:    (v) => {
+      const str = (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
+      return (v >= 0 ? posPrefix : negPrefix) + str + reset;
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INLINED LIB: /lib/market.js
+// ═══════════════════════════════════════════════════════════════
+
+function tryBuyAccess(ns) {
+  const cash = ns.getServerMoneyAvailable("home");
+  try {
+    if (!ns.stock.hasWSEAccount()   && cash > 200e6)  ns.stock.purchaseWseAccount();
+    if (!ns.stock.hasTIXAPIAccess() && cash > 5e9)    ns.stock.purchaseTixApi();
+    if (!ns.stock.has4SData()       && cash > 1e9)    ns.stock.purchase4SMarketData();
+    if (!ns.stock.has4SDataTIXAPI() && cash > 25e9)   ns.stock.purchase4SMarketDataTixApi();
+  } catch { /* stock market not yet unlocked — retry next tick */ }
+}
+
+function checkAccess(ns) {
+  try {
+    return {
+      hasTIX: ns.stock.hasTIXAPIAccess(),
+      has4S:  ns.stock.has4SDataTIXAPI(),
+    };
+  } catch {
+    return { hasTIX: false, has4S: false };
+  }
+}
+
+async function waitForTIX(ns) {
+  tryBuyAccess(ns);
+  let acc = checkAccess(ns);
+  while (!acc.hasTIX) {
+    ns.tprint("Waiting for TIX API access...");
+    await ns.sleep(30000);
+    tryBuyAccess(ns);
+    acc = checkAccess(ns);
+  }
+  return acc;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INLINED LIB: /lib/estimate.js
+// ═══════════════════════════════════════════════════════════════
+
+function estimateForecast(history, longWindow, shortWindow, inversionDelta, volatility) {
+  const len = history.length;
+  if (len < 3) return { forecast: 0.5, forecastShort: 0.5, forecastMicro: 0.5, inversionFlag: false, inversionEarly: false };
+
+  const longLen  = Math.min(longWindow, len - 1);
+  const shortLen = Math.min(shortWindow, len - 1);
+  const microLen = Math.min(5, len - 1);
+
+  const longStart  = len - longLen;
+  const shortStart = len - shortLen;
+  const microStart = len - microLen;
+
+  let longWeightedUps = 0;
+  let longWeightTotal = 0;
+  for (let i = longStart; i < len; i++) {
+    const pos = i - longStart;
+    const w   = 1 + (longLen > 1 ? pos / (longLen - 1) : 0);
+    longWeightTotal += w;
+    if (history[i] > history[i - 1]) longWeightedUps += w;
+  }
+
+  let shortUps = 0;
+  for (let i = shortStart; i < len; i++) {
+    if (history[i] > history[i - 1]) shortUps++;
+  }
+
+  let microUps = 0;
+  for (let i = microStart; i < len; i++) {
+    if (history[i] > history[i - 1]) microUps++;
+  }
+
+  const forecast      = longWeightTotal > 0 ? longWeightedUps / longWeightTotal : 0.5;
+  const forecastShort = shortUps / shortLen;
+  const forecastMicro = microUps / microLen;
+
+  const adaptiveDelta = (volatility != null)
+    ? inversionDelta * (1 + Math.min(2, volatility / 0.015))
+    : inversionDelta;
+
+  const crossedLongShort = (forecast > 0.5) !== (forecastShort > 0.5);
+  const inversionFlag    = crossedLongShort && Math.abs(forecast - forecastShort) > adaptiveDelta;
+
+  const crossedShortMicro = (forecastShort > 0.5) !== (forecastMicro > 0.5);
+  const inversionEarly    = crossedLongShort && crossedShortMicro;
+
+  return { forecast, forecastShort, forecastMicro, inversionFlag, inversionEarly };
+}
+
+function estimateVolatility(history) {
+  const len = history.length;
+  if (len < 2) return 0.01;
+  const window = Math.min(20, len - 1);
+  const start  = len - window;
+  const alpha  = 0.25;
+  let ewmaVol  = 0;
+  for (let i = start; i < len; i++) {
+    const pct = Math.abs(history[i] - history[i - 1]) / history[i - 1];
+    ewmaVol = alpha * pct + (1 - alpha) * ewmaVol;
+  }
+  return ewmaVol;
+}
+
+function calcMomentum(history) {
+  if (history.length < 9) return 0;
+  const len   = history.length;
+  const start = len - 8;
+  let score   = 0;
+  for (let i = start; i < len; i++) {
+    const weight = 1 + (i - start) * 0.5;
+    const mag    = Math.abs(history[i] - history[i - 1]) / history[i - 1];
+    const sign   = history[i] > history[i - 1] ? 1 : -1;
+    score += mag * weight * sign;
+  }
+  return score / (0.03 * 22.0);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INLINED LIB: /lib/portfolio.js
+// ═══════════════════════════════════════════════════════════════
+
+function totalWorth(ns) {
+  let w = ns.getServerMoneyAvailable("home");
+  for (const sym of ns.stock.getSymbols()) {
+    const [longShares, , shortShares] = ns.stock.getPosition(sym);
+    if (longShares > 0)  w += ns.stock.getSaleGain(sym, longShares, "Long");
+    if (shortShares > 0) w += ns.stock.getSaleGain(sym, shortShares, "Short");
+  }
+  return w;
+}
+
+function sparkline(data, width) {
+  const len = data.length;
+  if (len < 2) return "";
+  let min = data[0];
+  let max = data[0];
+  for (let i = 1; i < len; i++) {
+    const v = data[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  const range = max - min || 1;
+  const chars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
+  const step  = Math.max(1, Math.floor(len / width));
+  let result  = "";
+  for (let i = 0; i < width; i++) {
+    const bucketStart = i * step;
+    if (bucketStart >= len) break;
+    const bucketEnd = Math.min(bucketStart + step, len);
+    let val = data[bucketStart];
+    for (let j = bucketStart + 1; j < bucketEnd; j++) {
+      if (data[j] > val) val = data[j];
+    }
+    const idx = Math.min(7, Math.floor(((val - min) / range) * 8));
+    result += chars[idx];
+  }
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INLINED LIB: /lib/logging.js
+// ═══════════════════════════════════════════════════════════════
+
+function logTrade(ns, file, trade, extra = "", opts = {}) {
+  const { entryPrice, exitPrice, er } = opts;
+  let priceInfo = "";
+  if (entryPrice != null) priceInfo += `  In:${ns.formatNumber(entryPrice, 2)}`;
+  if (exitPrice  != null) priceInfo += ` Out:${ns.formatNumber(exitPrice, 2)}`;
+  if (er         != null) priceInfo += ` ER:${(er >= 0 ? "+" : "") + er.toFixed(4)}`;
+  const entry = `[T${trade.tick}] ${trade.type} ${trade.sym} ` +
+    `P/L:${ns.formatNumber(trade.pnl)}${extra}${priceInfo}\n`;
+  ns.write(file, entry, "a");
+}
+
+function logSnapshot(ns, file, data) {
+  ns.write(file, JSON.stringify(data) + "\n", "a");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BUILT-IN FALLBACKS (kept for completeness — never called in
+// this self-contained build because lib functions are always
+// available above)
+// ═══════════════════════════════════════════════════════════════
 function _fbGetTheme(ns) { const i = ns.args.indexOf("--theme"); return { theme: null, name: i >= 0 ? String(ns.args[i+1]||"classic") : "classic" }; }
 function _fbMakeColors() { const id = s => String(s); return { green:id,red:id,cyan:id,yellow:id,mag:id,dim:id,bold:id, pct:v=>(v>=0?"+":"")+(v*100).toFixed(1)+"%", plcol:(_,s)=>String(s) }; }
 function _fbTryBuyAccess(ns) { const m=ns.getServerMoneyAvailable("home"); try{if(m>200e6)ns.stock.purchaseWseAccount();}catch{} try{if(m>5e9)ns.stock.purchaseTixApi();}catch{} try{if(m>1e9)ns.stock.purchase4SMarketData();}catch{} try{if(m>25e9)ns.stock.purchase4SMarketDataTixApi();}catch{} }
@@ -20,26 +241,6 @@ function _fbTotalWorth(ns){let w=ns.getServerMoneyAvailable("home");try{for(cons
 function _fbSparkline(data,width=40){if(data.length<2)return"─".repeat(width);let mn=data[0],mx=data[0];for(const v of data){if(v<mn)mn=v;if(v>mx)mx=v;}const r=mx-mn||1,B="▁▂▃▄▅▆▇█";let o="";for(let i=0;i<width;i++){const idx=Math.min(data.length-1,Math.floor(i*(data.length-1)/Math.max(1,width-1)));o+=B[Math.min(7,Math.floor((data[idx]-mn)/r*8))];}return o;}
 function _fbLogTrade(ns,f,t,x=""){ns.write(f,`[T${t.tick}] ${t.type} ${t.sym} P/L:${t.pnl>=0?"+":""}${Math.round(t.pnl)}${x}\n`,"a");}
 function _fbLogSnap(ns,f,d){ns.write(f,JSON.stringify(d)+"\n","a");}
-
-async function _loadLibs(ns) {
-  const chk = p => ns.fileExists(p) ? import(p).catch(()=>null) : Promise.resolve(null);
-  const [t,m,e,p,l] = await Promise.all([chk("/lib/themes.js"),chk("/lib/market.js"),chk("/lib/estimate.js"),chk("/lib/portfolio.js"),chk("/lib/logging.js")]);
-  const missing = [!t&&"/lib/themes.js",!m&&"/lib/market.js",!e&&"/lib/estimate.js",!p&&"/lib/portfolio.js",!l&&"/lib/logging.js"].filter(Boolean);
-  if (missing.length) ns.tprint(`WARN: Missing libs — using fallbacks: ${missing.join(", ")}`);
-  return {
-    getTheme:           t?.getTheme           ?? _fbGetTheme,
-    makeColors:         t?.makeColors         ?? _fbMakeColors,
-    tryBuyAccess:       m?.tryBuyAccess       ?? _fbTryBuyAccess,
-    checkAccess:        m?.checkAccess        ?? _fbCheckAccess,
-    waitForTIX:         m?.waitForTIX         ?? _fbWaitForTIX,
-    estimateForecast:   e?.estimateForecast   ?? _fbEstFc,
-    estimateVolatility: e?.estimateVolatility ?? _fbEstVol,
-    totalWorth:         p?.totalWorth         ?? _fbTotalWorth,
-    sparkline:          p?.sparkline          ?? _fbSparkline,
-    logTrade:           l?.logTrade           ?? _fbLogTrade,
-    logSnapshot:        l?.logSnapshot        ?? _fbLogSnap,
-  };
-}
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -61,10 +262,8 @@ export async function main(ns) {
   // Open a tail window so the dashboard is visible
   ns.ui.openTail();
 
-  // Load shared libs — falls back to built-in implementations if /lib/ files are missing
-  const { getTheme, makeColors, tryBuyAccess, checkAccess, waitForTIX,
-          estimateForecast, estimateVolatility, totalWorth, sparkline,
-          logTrade, logSnapshot } = await _loadLibs(ns);
+  // All lib functions are inlined above — no dynamic imports needed.
+  // Names are bound directly so the rest of the script is unchanged.
 
 
   // ═══════════════════════════════════════════════════════════════

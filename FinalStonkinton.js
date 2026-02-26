@@ -59,7 +59,7 @@ export async function main(ns) {
   // Suppress built-in Bitburner log spam (sleep, stock API calls, etc.)
   ns.disableLog("ALL");
   // Open a tail window so the dashboard is visible
-  ns.tail();
+  ns.ui.openTail();
 
   // Load shared libs — falls back to built-in implementations if /lib/ files are missing
   const { getTheme, makeColors, tryBuyAccess, checkAccess, waitForTIX,
@@ -985,7 +985,7 @@ export async function main(ns) {
     if (!YOLO) {
       const opps = Object.values(stocks)
         .filter(s => s.longShares === 0 && s.shortShares === 0)
-        .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, inv: s.inversionFlag }))
+        .map(s => ({ sym: s.sym, er: expectedReturn(s), f: has4S ? s.forecast : s.estForecast, inv: s.inversionFlag, stock: s }))
         .filter(o => Math.abs(o.er) > 0.0001 && !o.inv)
         .sort((x, y) => Math.abs(y.er) - Math.abs(x.er))
         .slice(0, 5);

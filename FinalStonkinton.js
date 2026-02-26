@@ -1909,10 +1909,20 @@ export async function main(ns) {
       s.ticksSinceAction++;
     }
 
-    // Need ~30 ticks of price data before estimates are usable.
-    // _fbEstFc uses Math.min(longWindow, n-1) — at tick 10, the "76-tick window"
-    // is actually just 9 data points, producing unreliable forecasts.
-    if (!has4S && tickCount < 30) { printDashboard(); continue; }
+    // Initialize paper portfolios before the warmup guard so they're ready
+    // as soon as trading starts (paper lab was never showing during warmup).
+    if (!paperInitialized && hasTIX) {
+      const startCash = totalWorth(ns);
+      for (const port of paperPortfolios) {
+        port.cash = startCash;
+        port.startingCash = startCash;
+        port.peakValue = startCash;
+      }
+      paperInitialized = true;
+    }
+
+    // Need ~10 ticks of price data before estimates are usable.
+    if (!has4S && tickCount < 10) { printDashboard(); continue; }
 
     // ── Execute trades ──
     const tradesBefore = totalTradeCount;
@@ -1936,18 +1946,6 @@ export async function main(ns) {
     if (tickCount % 100 === 0) doLogSession();
 
     // ── Paper trading tick ──
-    // Initialize paper portfolios with player's TOTAL wealth (not just free cash).
-    // The real trader may have already spent most of the cash on stocks by this point,
-    // so using getServerMoneyAvailable would give near-zero virtual cash and block all buys.
-    if (!paperInitialized && hasTIX) {
-      const startCash = totalWorth(ns);  // full net worth: cash + all open positions
-      for (const port of paperPortfolios) {
-        port.cash = startCash;
-        port.startingCash = startCash;
-        port.peakValue = startCash;
-      }
-      paperInitialized = true;
-    }
     if (paperInitialized) {
       paperTickCount++;
       for (const port of paperPortfolios) {

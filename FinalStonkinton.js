@@ -243,7 +243,9 @@ function logSnapshot(ns, file, data) {
 
 async function runPaperMode(ns) {
   ns.disableLog("ALL");
-  ns.tail();
+  ns.ui.openTail();
+  const { theme, name: THEME } = getTheme(ns);
+  const C = makeColors(theme);
 
   const COMMISSION = 100000;
   const GRADUATE_TICKS = 300;  // more cycles = better statistical confidence
@@ -567,44 +569,57 @@ async function runPaperMode(ns) {
   // Dashboard
   function printPaperDashboard() {
     ns.clearLog();
-    ns.print("╔══════════════════════════════════════════════════════════════════╗");
-    ns.print("║              PAPER TRADING LAB - Strategy Tester                ║");
-    ns.print("║              No real money at risk - read-only mode             ║");
-    ns.print("╠══════════════════════════════════════════════════════════════════╣");
-    ns.print(`║ Tick: ${tickCount} / ${GRADUATE_TICKS} to graduate | Mode: ${has4S ? "4S DATA" : "ESTIMATED"} | Shorts: ${hasShorts ? "ON" : "OFF"}`);
-    ns.print("╠════════════════╦═════════════╦════════╦═════════╦══════╦═══════╣");
-    ns.print("║ Strategy       ║ P/L         ║ Win %  ║ Trades  ║ DD   ║ Sharp ║");
-    ns.print("╠════════════════╬═════════════╬════════╬═════════╬══════╬═══════╣");
+    const LINE = "══════════════════════════════════════════════════════════════════";
+    ns.print(`╔${LINE}╗`);
+    ns.print(`║  ${C.bold("FINAL STONKINTON")}  ${C.cyan("[ PAPER MODE ]")}${" ".repeat(35)}║`);
+    ns.print(`║  ${C.dim("Strategy tester — no real money at risk")}${" ".repeat(27)}║`);
+    ns.print(`╠${LINE}╣`);
+    const modeStr  = has4S ? C.green("4S DATA") : C.yellow("ESTIMATED");
+    const shortStr = hasShorts ? C.green("ON") : C.red("OFF");
+    const prog     = tickCount >= GRADUATE_TICKS
+      ? C.green(`${tickCount} / ${GRADUATE_TICKS} ✓ GRADUATED`)
+      : `${C.cyan(String(tickCount))} / ${C.dim(String(GRADUATE_TICKS))}`;
+    ns.print(`║ Tick: ${prog} | Mode: ${modeStr} | Shorts: ${shortStr} | Theme: ${C.dim(THEME)}`);
+    ns.print(`╠════════════════╦═════════════╦════════╦═════════╦══════╦═══════╣`);
+    ns.print(`║ ${C.bold("Strategy      ")} ║ ${C.bold("P/L        ")} ║ ${C.bold("Win %")} ║ ${C.bold("Trades")} ║ ${C.bold("DD  ")} ║ ${C.bold("Sharp")} ║`);
+    ns.print(`╠════════════════╬═════════════╬════════╬═════════╬══════╬═══════╣`);
 
     const scoredPorts = portfolios.map(port => ({ port, score: scorePortfolio(port) }));
     scoredPorts.sort((x, y) => y.score.pnl - x.score.pnl);
 
     for (const { port, score } of scoredPorts) {
-      const name = port.strat.name.padEnd(14);
-      const pnl = ns.formatNumber(score.pnl, 1).padStart(11);
-      const wr = (score.total > 0 ? (score.winRate * 100).toFixed(1) + "%" : "  n/a").padStart(6);
-      const trades = String(score.total).padStart(7);
-      const dd = ns.formatNumber(score.maxDrawdown, 0).padStart(4);
-      const sh = score.sharpe.toFixed(2).padStart(5);
-      const graduated = (tickCount >= GRADUATE_TICKS && score.pnl > 0 && score.winRate >= GRADUATE_WIN_RATE) ? "*" : " ";
-      ns.print(`║ ${name}${graduated}║ ${pnl} ║ ${wr} ║ ${trades} ║ ${dd} ║ ${sh} ║`);
+      const isGrad = tickCount >= GRADUATE_TICKS && score.pnl > 0 && score.winRate >= GRADUATE_WIN_RATE;
+      const name     = port.strat.name.padEnd(14);
+      const pnlRaw   = ns.formatNumber(score.pnl, 1).padStart(11);
+      const pnlStr   = C.plcol(score.pnl, pnlRaw);
+      const wrRaw    = (score.total > 0 ? (score.winRate * 100).toFixed(1) + "%" : "  n/a").padStart(6);
+      const wrStr    = score.total > 0
+        ? (score.winRate >= GRADUATE_WIN_RATE ? C.green(wrRaw) : C.red(wrRaw))
+        : C.dim(wrRaw);
+      const trades   = String(score.total).padStart(7);
+      const dd       = ns.formatNumber(score.maxDrawdown, 0).padStart(4);
+      const sh       = score.sharpe.toFixed(2).padStart(5);
+      const gradMark = isGrad ? C.green("*") : " ";
+      ns.print(`║ ${isGrad ? C.green(name) : name}${gradMark}║ ${pnlStr} ║ ${wrStr} ║ ${trades} ║ ${dd} ║ ${sh} ║`);
     }
 
-    ns.print("╚════════════════╩═════════════╩════════╩═════════╩══════╩═══════╝");
+    ns.print(`╠${LINE}╣`);
     if (tickCount >= GRADUATE_TICKS) {
       const grads = scoredPorts.filter(s => s.score.pnl > 0 && s.score.winRate >= GRADUATE_WIN_RATE);
       if (grads.length > 0) {
-        ns.print(` * = Graduated to /strats/proven.txt (${grads.length} strategies)`);
+        ns.print(`║ ${C.green("★")} ${C.green(String(grads.length))} ${C.green("strategies graduated")} → ${C.cyan("/strats/proven.txt")}${" ".repeat(20)}║`);
       } else {
-        ns.print(` No strategies met graduation criteria yet (need +P/L and >${GRADUATE_WIN_RATE * 100}% win rate)`);
+        ns.print(`║ ${C.yellow("No strategies met graduation yet")} ${C.dim(`(need +P/L and >${GRADUATE_WIN_RATE * 100}% win rate)`)}  ║`);
       }
     } else {
-      ns.print(` Collecting data... ${GRADUATE_TICKS - tickCount} ticks until graduation check`);
+      const remaining = GRADUATE_TICKS - tickCount;
+      const bar = C.cyan("█".repeat(Math.floor((tickCount / GRADUATE_TICKS) * 20))) + C.dim("░".repeat(20 - Math.floor((tickCount / GRADUATE_TICKS) * 20)));
+      ns.print(`║ ${bar} ${C.dim(remaining + " ticks to graduation check")}${" ".repeat(10)}║`);
     }
 
-    // Show top 5 virtual positions from the best-performing strategy
-    ns.print("");
-    ns.print(" Active Virtual Positions (best strategy):");
+    ns.print(`╠${LINE}╣`);
+    ns.print(`║ ${C.bold("Active Virtual Positions")} ${C.dim("(best strategy)")}${" ".repeat(25)}║`);
+
     if (scoredPorts.length > 0) {
       const best = scoredPorts[0].port;
       const active = Object.entries(best.positions)
@@ -621,11 +636,13 @@ async function runPaperMode(ns) {
         .slice(0, 5);
 
       for (const pos of active) {
-        const pnlStr = (pos.pnl >= 0 ? "+" : "") + ns.formatNumber(pos.pnl, 1);
-        ns.print(`   ${pos.dir} ${pos.sym.padEnd(5)} ${ns.formatNumber(pos.shares, 0).padStart(8)} shares  ${pnlStr}`);
+        const pnlRaw = (pos.pnl >= 0 ? "+" : "") + ns.formatNumber(pos.pnl, 1);
+        const dirStr = pos.dir === "L" ? C.green("L") : C.red("S");
+        ns.print(`║   ${dirStr} ${C.cyan(pos.sym.padEnd(5))} ${ns.formatNumber(pos.shares, 0).padStart(8)} shares  ${C.plcol(pos.pnl, pnlRaw)}${" ".repeat(8)}║`);
       }
-      if (active.length === 0) ns.print("   (none yet - waiting for signals)");
+      if (active.length === 0) ns.print(`║   ${C.dim("(none yet — waiting for signals)")}${" ".repeat(32)}║`);
     }
+    ns.print(`╚${LINE}╝`);
   }
 
   // ═══ INIT ═══
@@ -653,8 +670,8 @@ async function runPaperMode(ns) {
     port.peakValue = startCash;
   }
 
-  ns.print(`Paper Trading Lab initialized: ${symbols.length} stocks, ${STRATEGIES.length} strategies`);
-  ns.print(`Starting virtual cash: ${ns.formatNumber(startCash)} per strategy`);
+  ns.print(`${C.cyan("Paper Trading Lab")} initialized: ${C.bold(String(symbols.length))} stocks, ${C.bold(String(STRATEGIES.length))} strategies`);
+  ns.print(`Starting virtual cash: ${C.green(ns.formatNumber(startCash))} per strategy`);
 
   // ═══ MAIN LOOP ═══
   while (true) {

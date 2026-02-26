@@ -1786,7 +1786,10 @@ export async function main(ns) {
     if (paperInitialized && paperPortfolios.length > 0) {
       ns.print(`╠${LINE}╣`);
       ns.print(`║ ${C.mag(C.bold(" PAPER LAB"))}  ${C.dim(`${paperTickCount}T / ${PAPER_GRADUATE_TICKS} to graduate`)}`);
-      const paperScored = paperPortfolios.map(port => {
+      const _pN = paperPortfolios.length;
+      const _ss  = Math.floor(paperTickCount / 60) % _pN;
+      const _sso = (_ss + Math.floor(_pN / 2)) % _pN;
+      const paperScored = paperPortfolios.map((port, pidx) => {
         const wins = port.trades.filter(t => t.pnl > 0).length;
         const total = port.trades.length;
         const wr = total > 0 ? wins / total : 0;
@@ -1799,7 +1802,9 @@ export async function main(ns) {
         }
         const pnl = pVal - port.startingCash;
         const isGrad = paperTickCount >= PAPER_GRADUATE_TICKS && pnl > 0 && wr >= PAPER_GRADUATE_WR;
-        return { name: port.strat.name, pnl, wr, total, isGrad };
+        // Tag: [S] = longs+shorts mixed slot, [S!] = short-only slot (EST mode)
+        const modeTag = !has4S && pidx === _sso ? "[S!]" : (!has4S && pidx === _ss ? "[S]" : "    ");
+        return { name: port.strat.name, pnl, wr, total, isGrad, modeTag };
       }).sort((x, y) => y.pnl - x.pnl);
       for (const s of paperScored) {
         const gradMark = s.isGrad ? C.green(" ★") : "  ";
@@ -1807,7 +1812,7 @@ export async function main(ns) {
         const pnlStr   = C.plcol(s.pnl, ns.formatNumber(s.pnl, 1).padStart(10));
         const wrRaw    = (s.total > 0 ? (s.wr * 100).toFixed(1) + "%" : "n/a").padStart(6);
         const wrStr    = s.total > 0 ? (s.wr >= PAPER_GRADUATE_WR ? C.green(wrRaw) : C.red(wrRaw)) : C.dim(wrRaw);
-        ns.print(`║  ${nameStr} ${pnlStr}  ${wrStr}  ${C.dim(String(s.total) + "T")}${gradMark}`);
+        ns.print(`║  ${nameStr} ${pnlStr}  ${wrStr}  ${C.dim(String(s.total) + "T")} ${C.cyan(s.modeTag)}${gradMark}`);
       }
     }
     ns.print(`╚${LINE}╝`);
@@ -1997,13 +2002,15 @@ export async function main(ns) {
             .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
           // In EST mode: cap forecastBuyLong at 0.62 so high-threshold
           // strategies (Turtle 0.65, Sniper 0.70) can still get test trades.
-          // Also rotate which 2 portfolios get shorts in EST mode — each strat
-          // cycles through having shorts ON so we can compare with vs without.
+          // Rotate 2 shorts slots every 60 ticks so every strategy cycles
+          // through shorts exposure. shortsSlot = longs+shorts mixed.
+          // shortsOnlySlot = NO longs, shorts only (pure short strategy test).
           const portIdx = paperPortfolios.indexOf(port);
           const nStrats = paperPortfolios.length;
-          const shortsSlot = Math.floor(paperTickCount / 60) % nStrats;
-          const shortsSlot2 = (shortsSlot + Math.floor(nStrats / 2)) % nStrats;
-          const paperCanShort = has4S || portIdx === shortsSlot || portIdx === shortsSlot2;
+          const shortsSlot     = Math.floor(paperTickCount / 60) % nStrats;
+          const shortsOnlySlot = (shortsSlot + Math.floor(nStrats / 2)) % nStrats;
+          const isShortsMixed  = has4S || portIdx === shortsSlot;
+          const isShortOnly    = !has4S && portIdx === shortsOnlySlot;
           const effectiveBuyLong  = has4S ? strat.forecastBuyLong  : Math.min(strat.forecastBuyLong,  0.62);
           const effectiveBuyShort = has4S ? strat.forecastBuyShort : Math.max(strat.forecastBuyShort, 0.38);
           for (const r of ranked) {
@@ -2011,7 +2018,7 @@ export async function main(ns) {
             const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
             const budget = Math.min(port.cash, paperTW * strat.maxPct);
             if (budget < 2e5) continue;
-            if (r.f > effectiveBuyLong) {
+            if (!isShortOnly && r.f > effectiveBuyLong) {
               const price = ns.stock.getAskPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.longShares);
               if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {
@@ -2020,7 +2027,7 @@ export async function main(ns) {
                 pp.longShares = tot;
                 port.cash -= shares * price + PAPER_COMMISSION;
               }
-            } else if (r.f < effectiveBuyShort && paperCanShort) {
+            } else if (r.f < effectiveBuyShort && (isShortsMixed || isShortOnly)) {
               const price = ns.stock.getBidPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.shortShares);
               if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {

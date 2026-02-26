@@ -787,7 +787,9 @@ export async function main(ns) {
   const CONFIG = {
     // ── Risk management ──
     reserveCash:      1_000_000,  // always keep $1m liquid — never invest last dollar
-    maxDeploy:        0.80,       // never invest more than 80% of total worth
+    maxDeploy:        0.60,       // never invest more than 60% of total worth (community standard: keep 40% cash)
+    emaAlphaLong:     0.013,      // EMA decay for long forecast (~76-tick effective window, α≈2/(N+1))
+    emaAlphaShort:    0.182,      // EMA decay for short forecast (~10-tick effective window, α≈2/(N+1))
     maxPortfolioPct:  0.34,       // max 34% of worth in any single stock (diversification)
     commission:       100_000,    // Bitburner charges $100k per buy/sell transaction
 
@@ -1042,8 +1044,10 @@ export async function main(ns) {
       priceHistory:    [],       // rolling window of prices (last tickHistoryLen ticks)
       forecast:        0.5,      // 4S forecast (0-1, >0.5 = bullish) — only valid when has4S
       volatility:      0.01,     // 4S volatility — only valid when has4S
-      estForecast:     0.5,      // our estimated forecast from price history
-      estForecastShort: 0.5,     // short-window forecast for cycle-flip detection
+      estForecast:     0.5,      // our estimated forecast from price history (EMA)
+      estForecastShort: 0.5,     // short-window EMA forecast for cycle-flip detection
+      emaLong:         0.5,      // running EMA of up-tick rate, long window (slow, ~76 ticks)
+      emaShort:        0.5,      // running EMA of up-tick rate, short window (fast, ~10 ticks)
       longShares:      0,        // current long position size (synced from game each tick)
       longAvgPrice:    0,        // average buy price for long position
       shortShares:     0,        // current short position size
@@ -1092,20 +1096,23 @@ export async function main(ns) {
   // over 2 ticks to filter single-tick noise. stock.inversionFlag only
   // becomes true after the raw signal persists for >=1 additional tick.
   function runEstimation(stock) {
-    // Use simple equal-weight up-tick count (_fbEstFc) — mirrors Bitburner's internal
-    // forecast calculation. The weighted-recency version (estimateForecast) amplifies
-    // short-term noise and produces false entries without 4S data.
-    const est = _fbEstFc(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta);
+    const ph = stock.priceHistory;
 
-    stock.estForecast      = est.forecast;
-    stock.estForecastShort = est.forecastShort;
-    stock.inversionEarly   = false;  // _fbEstFc doesn't compute inversionEarly
+    // ── EMA forecast (community-standard estimator) ──
+    // Each tick: ema = ema * (1 - α) + increased * α
+    // Long EMA (α≈0.013, ~76-tick effective window): tracks sustained trend.
+    // Short EMA (α≈0.182, ~10-tick effective window): tracks recent momentum.
+    // Smoother than hard-window _fbEstFc — no cliff when old ticks fall out.
+    if (ph.length >= 2) {
+      const increased = ph[ph.length - 1] > ph[ph.length - 2] ? 1 : 0;
+      stock.emaLong  = stock.emaLong  * (1 - CONFIG.emaAlphaLong)  + increased * CONFIG.emaAlphaLong;
+      stock.emaShort = stock.emaShort * (1 - CONFIG.emaAlphaShort) + increased * CONFIG.emaAlphaShort;
+    }
+    stock.estForecast      = stock.emaLong;
+    stock.estForecastShort = stock.emaShort;
+    stock.inversionEarly   = false;
 
     // ── Short-term price momentum ──
-    // Compare the mean of the last N ticks vs the N ticks before that.
-    // Positive = prices rising faster lately = bullish momentum.
-    // Used by expectedReturn() to nudge estimated forecast when we have no 4S data.
-    const ph  = stock.priceHistory;
     const mW  = CONFIG.momentumWindow;
     if (ph.length >= mW * 2) {
       let oldSum = 0, newSum = 0;
@@ -1118,10 +1125,8 @@ export async function main(ns) {
     }
 
     // ── 2-tick inversion confirmation ──
-    // rawInv fires on the first tick of disagreement.
-    // We set inversionFlag=true only after it persists for >=1 more tick.
-    // This prevents 1-tick noise spikes from triggering hard exits.
-    const rawInv = est.inversionFlag;
+    const rawInv = (stock.emaLong > 0.5) !== (stock.emaShort > 0.5) &&
+                   Math.abs(stock.emaLong - stock.emaShort) > CONFIG.inversionDelta;
     if (rawInv) {
       if (stock.inversionSince === 0) stock.inversionSince = tickCount;
       if (tickCount - stock.inversionSince >= 1) stock.inversionFlag = true;

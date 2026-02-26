@@ -1928,9 +1928,11 @@ export async function main(ns) {
     if (tickCount % 100 === 0) doLogSession();
 
     // ── Paper trading tick ──
-    // Initialize paper portfolios once we have starting cash
+    // Initialize paper portfolios with player's TOTAL wealth (not just free cash).
+    // The real trader may have already spent most of the cash on stocks by this point,
+    // so using getServerMoneyAvailable would give near-zero virtual cash and block all buys.
     if (!paperInitialized && hasTIX) {
-      const startCash = ns.getServerMoneyAvailable("home");
+      const startCash = totalWorth(ns);  // full net worth: cash + all open positions
       for (const port of paperPortfolios) {
         port.cash = startCash;
         port.startingCash = startCash;

@@ -2,6 +2,29 @@
 
 ---
 
+## Hotfix v2 — Spread Filter Re-tuned + Paper Top-3 Unblocked (2026-02-26)
+
+### Bug: `spreadMaxFrac: 50.0` allowed too many low-quality trades
+The previous hotfix overcorrected from 3.0 → 50.0. At 50.0, the script would enter trades needing up to 25 ticks just to recover the spread cost — eating into profit margins on signals that barely had any edge. On a small post-reset portfolio with noisy estimated forecasts, this meant bad trades were being entered.
+
+**Root cause of "fat profits → wasting money":** The script config is identical to the profitable version except the spread filter. Old value of 3.0 worked fine pre-reset with 4S data + high-vol stocks producing large ERs. Post-reset, no 4S and smaller ERs meant 3.0 blocked everything. The overcorrection to 50.0 unblocked trading but let in junk signals.
+
+**Fix:** `spreadMaxFrac: 50.0 → 20.0`. Breakeven within ~10 ticks. Passes strong signals (WDS ER=0.00496, spread=2.18%: breaks even in ~4 ticks ✓). Blocks weak signals with wide spreads (ER=0.001, spread=2%: needs 20 ticks, rejected ✗).
+
+---
+
+### Bug: Paper Conservative/Turtle/Sniper never traded (0T shown)
+Paper minimums were set to `$1m`. With a $4.24m portfolio:
+- Conservative (25% cap): $1.06m → barely passed
+- **Turtle (20% cap): $848k → blocked**
+- **Sniper (15% cap): $636k → blocked**
+
+Turtle and Sniper showed `0T / n/a` the entire run, defeating the purpose of the paper lab.
+
+**Fix:** Paper minimums `$1m → $200k` (2× PAPER_COMMISSION). Paper money is virtual so commission overhead is irrelevant — the goal is learning which strategy wins, not optimising for trade efficiency.
+
+---
+
 ## Hotfix — Post-Aug Reset Trading Broken (2026-02-26)
 
 ### Bug: Spread filter blocked ALL buys after aug reset

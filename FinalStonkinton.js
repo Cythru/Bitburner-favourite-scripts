@@ -480,8 +480,8 @@ async function runPaperMode(ns) {
       }
     }
 
-    // Buy phase
-    if (port.cash < 1e6) return;
+    // Buy phase — paper money, so minimum is 2× commission not $1m
+    if (port.cash < 2e5) return;
     const tw = portfolioValue(port);
     const maxPerStock = tw * strat.maxPct;
 
@@ -497,11 +497,11 @@ async function runPaperMode(ns) {
     .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
 
     for (const r of ranked) {
-      if (port.cash < 1e6) break;
+      if (port.cash < 2e5) break;
       const p = getPosition(port, r.sym);
       const currentVal = p.longShares * ns.stock.getBidPrice(r.sym) + p.shortShares * ns.stock.getAskPrice(r.sym);
       const budget = Math.min(port.cash, maxPerStock - currentVal);
-      if (budget < 1e6) continue;
+      if (budget < 2e5) continue;
 
       if (r.f > strat.forecastBuyLong) {
         virtualBuy(port, r.sym, "Long", budget);
@@ -843,7 +843,9 @@ export async function main(ns) {
     // Example: WDS spread=2.18%, ER=0.00496/tick → breakeven ~9 ticks → fine to buy.
     // With typical Bitburner holds of 20-75 ticks, only reject if spread > ~25 ticks of ER.
     // Old value of 3.0 was far too strict — it blocked nearly every trade by assuming 1-tick holds.
-    spreadMaxFrac:         50.0,  // skip buy only if spread > 50 ticks of ER (breakeven > 25 ticks)
+    // 50.0 was too loose — allowed trades needing 25 ticks just to recover spread costs.
+    // 20.0 is calibrated: only enter if spread breaks even within ~10 ticks, matching typical holds.
+    spreadMaxFrac:         20.0,  // skip buy if spread > 20 ticks of ER (breakeven > 10 ticks)
 
     // ── Momentum blend (no-4S only) ──
     // When we don't have 4S data, nudge the estimated forecast with short-term price
@@ -1972,7 +1974,7 @@ export async function main(ns) {
         // Buy phase — 100% virtual, ZERO real money moved.
         // Only reads prices (getAskPrice/getBidPrice). Never calls buyStock/buyShort.
         // port.cash is a fake virtual bankroll — modifying it has no effect on real funds.
-        if (port.cash >= 1e6) {
+        if (port.cash >= 2e5) {
           let paperTW = port.cash;
           for (const sym of symbols) {
             const pp = port.positions[sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
@@ -1987,10 +1989,10 @@ export async function main(ns) {
           }).filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
             .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
           for (const r of ranked) {
-            if (port.cash < 1e6) break;
+            if (port.cash < 2e5) break;
             const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
             const budget = Math.min(port.cash, paperTW * strat.maxPct);
-            if (budget < 1e6) continue;
+            if (budget < 2e5) continue;
             if (r.f > strat.forecastBuyLong) {
               const price = ns.stock.getAskPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.longShares);

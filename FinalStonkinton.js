@@ -749,12 +749,17 @@ export async function main(ns) {
   // ═══════════════════════════════════════════════════════════════
 
   const PAPER_STRATEGIES = [
+    // ── Core strategies ──
     { name: "Aggressive",   forecastBuyLong: 0.55,  forecastBuyShort: 0.45, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.00005, maxPct: 0.40, shortWindow: 10 },
     { name: "Moderate",     forecastBuyLong: 0.575, forecastBuyShort: 0.425,forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0001,  maxPct: 0.34, shortWindow: 10 },
     { name: "Conservative", forecastBuyLong: 0.60,  forecastBuyShort: 0.40, forecastSellLong: 0.51, forecastSellShort: 0.49, buyThreshold: 0.001,   maxPct: 0.25, shortWindow: 10 },
     { name: "Turtle",       forecastBuyLong: 0.65,  forecastBuyShort: 0.35, forecastSellLong: 0.52, forecastSellShort: 0.48, buyThreshold: 0.002,   maxPct: 0.20, shortWindow: 10 },
     { name: "Sniper",       forecastBuyLong: 0.70,  forecastBuyShort: 0.30, forecastSellLong: 0.55, forecastSellShort: 0.45, buyThreshold: 0.003,   maxPct: 0.15, shortWindow: 10 },
     { name: "Momentum",     forecastBuyLong: 0.55,  forecastBuyShort: 0.45, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0001,  maxPct: 0.34, shortWindow: 5  },
+    // ── Extended strategies ──
+    { name: "FastFlip",     forecastBuyLong: 0.58,  forecastBuyShort: 0.42, forecastSellLong: 0.50, forecastSellShort: 0.50, buyThreshold: 0.0002,  maxPct: 0.30, shortWindow: 3  },
+    { name: "DeepValue",    forecastBuyLong: 0.72,  forecastBuyShort: 0.28, forecastSellLong: 0.56, forecastSellShort: 0.44, buyThreshold: 0.004,   maxPct: 0.12, shortWindow: 10 },
+    { name: "Balanced",     forecastBuyLong: 0.62,  forecastBuyShort: 0.38, forecastSellLong: 0.51, forecastSellShort: 0.49, buyThreshold: 0.0015,  maxPct: 0.28, shortWindow: 8  },
   ];
   const PAPER_COMMISSION   = 100000;
   const PAPER_GRADUATE_TICKS = 300;
@@ -1990,12 +1995,23 @@ export async function main(ns) {
             return { sym, f, er, inv: s.inversionFlag, maxShares: ns.stock.getMaxShares(sym) };
           }).filter(r => Math.abs(r.er) > strat.buyThreshold && !r.inv)
             .sort((x, y) => Math.abs(y.er) - Math.abs(x.er));
+          // In EST mode: cap forecastBuyLong at 0.62 so high-threshold
+          // strategies (Turtle 0.65, Sniper 0.70) can still get test trades.
+          // Also rotate which 2 portfolios get shorts in EST mode — each strat
+          // cycles through having shorts ON so we can compare with vs without.
+          const portIdx = paperPortfolios.indexOf(port);
+          const nStrats = paperPortfolios.length;
+          const shortsSlot = Math.floor(paperTickCount / 60) % nStrats;
+          const shortsSlot2 = (shortsSlot + Math.floor(nStrats / 2)) % nStrats;
+          const paperCanShort = has4S || portIdx === shortsSlot || portIdx === shortsSlot2;
+          const effectiveBuyLong  = has4S ? strat.forecastBuyLong  : Math.min(strat.forecastBuyLong,  0.62);
+          const effectiveBuyShort = has4S ? strat.forecastBuyShort : Math.max(strat.forecastBuyShort, 0.38);
           for (const r of ranked) {
             if (port.cash < 2e5) break;
             const pp = port.positions[r.sym] || { longShares: 0, longAvgPrice: 0, shortShares: 0, shortAvgPrice: 0 };
             const budget = Math.min(port.cash, paperTW * strat.maxPct);
             if (budget < 2e5) continue;
-            if (r.f > strat.forecastBuyLong) {
+            if (r.f > effectiveBuyLong) {
               const price = ns.stock.getAskPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.longShares);
               if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {
@@ -2004,7 +2020,7 @@ export async function main(ns) {
                 pp.longShares = tot;
                 port.cash -= shares * price + PAPER_COMMISSION;
               }
-            } else if (r.f < strat.forecastBuyShort && has4S) {
+            } else if (r.f < effectiveBuyShort && paperCanShort) {
               const price = ns.stock.getBidPrice(r.sym);
               const shares = Math.min(Math.floor((budget - PAPER_COMMISSION) / price), r.maxShares - pp.shortShares);
               if (shares > 0 && shares * price + PAPER_COMMISSION <= port.cash) {
@@ -2048,7 +2064,11 @@ export async function main(ns) {
           }
           return null;
         }).filter(Boolean);
-        if (proven.length > 0) await ns.write("/strats/proven.txt", JSON.stringify(proven, null, 2), "w");
+        if (proven.length > 0) {
+          await ns.write("/strats/proven.txt", JSON.stringify(proven, null, 2), "w");
+          // Export to disk via local HTTP so external tools can read results.
+          try { await fetch("http://127.0.0.1:12526/proven", { method: "POST", body: JSON.stringify(proven) }); } catch { /* server not running — ignore */ }
+        }
       }
     }
 

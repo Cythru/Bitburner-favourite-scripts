@@ -2,6 +2,19 @@
 
 ---
 
+## Hotfix v3 — Estimation Algorithm Regression Fix (2026-02-26)
+
+### Root cause of "fat profits → wasting money" (actual fix)
+
+**Previous diagnosis was wrong.** Config values (thresholds, Kelly K, commission, etc.) between old and new scripts were identical. The real cause: the estimation algorithm changed.
+
+- **Old script**: Dynamically imported `lib/estimate.js` at runtime, fell back to `_fbEstFc` (simple equal-weight up-tick counter) because the import chain was always failing silently with "WARN: Missing libs". The fallback algorithm mirrors Bitburner's internal forecast calculation — stable and accurate.
+- **New script (broken)**: Inlined `estimateForecast()` with 2× recency-weighted long window. This amplifies short-term noise. Without 4S data, the signal is already noisy — weighting recent ticks more makes it worse. Result: false entries (e.g. APHE entered on a noisy spike, lost −14.6%).
+
+**Fix:** `runEstimation()` now calls `_fbEstFc` directly (the same simple up-tick counter the old script used). `estimateForecast` / EWMA vol remain inlined in the file but are no longer used for trade signals.
+
+---
+
 ## Hotfix v2 — Spread Filter Re-tuned + Paper Top-3 Unblocked (2026-02-26)
 
 ### Bug: `spreadMaxFrac: 50.0` allowed too many low-quality trades

@@ -1063,14 +1063,14 @@ export async function main(ns) {
   // over 2 ticks to filter single-tick noise. stock.inversionFlag only
   // becomes true after the raw signal persists for >=1 additional tick.
   function runEstimation(stock) {
-    // Pass estimated volatility to enable adaptive inversion delta.
-    // Uses previous-tick vol (ok: estimate.js vol is smooth, single-tick lag negligible).
-    const vol = estimateVolatility(stock.priceHistory);
-    const est = estimateForecast(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta, vol);
+    // Use simple equal-weight up-tick count (_fbEstFc) — mirrors Bitburner's internal
+    // forecast calculation. The weighted-recency version (estimateForecast) amplifies
+    // short-term noise and produces false entries without 4S data.
+    const est = _fbEstFc(stock.priceHistory, CONFIG.longWindow, CONFIG.shortWindow, CONFIG.inversionDelta);
 
     stock.estForecast      = est.forecast;
     stock.estForecastShort = est.forecastShort;
-    stock.inversionEarly   = est.inversionEarly ?? false;  // leading indicator
+    stock.inversionEarly   = false;  // _fbEstFc doesn't compute inversionEarly
 
     // ── Short-term price momentum ──
     // Compare the mean of the last N ticks vs the N ticks before that.

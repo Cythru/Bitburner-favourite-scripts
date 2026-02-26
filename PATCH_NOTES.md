@@ -1,5 +1,44 @@
 # Sicko Mode — Stock Trading Overhaul Patch Notes
 
+---
+
+## Hotfix — Post-Aug Reset Trading Broken (2026-02-26)
+
+### Bug: Spread filter blocked ALL buys after aug reset
+`spreadMaxFrac` was set to `3.0`, meaning a stock was skipped if its bid-ask spread exceeded 3× its per-tick expected return. This implicitly assumed a ~1.5-tick hold time. With typical Bitburner spreads of 1–3% and per-tick ERs of 0.1–0.5%, almost every stock failed this check — silently, with no warning in the dashboard. The script would scan, find signals in RADAR, and then buy nothing.
+
+**Why it worked before:** Pre-reset with a large balance and 4S data, high-volatility stocks produced larger ERs (0.5–1.5%/tick), and many passed even at `×3`. Post-reset with estimated data and lower ERs, none did.
+
+**Fix:** `spreadMaxFrac: 3.0 → 50.0`. Spread is a one-time cost; a 2% spread on a 20-tick hold is trivial. Only rejects trades where the spread would take >25 ticks to recover.
+
+---
+
+### Bug: `$2m` minimum buy gate blocked all trades on small post-reset portfolios
+Every stock had a hard `if (budget < $2m) continue` gate. With a $4–5m post-reset balance and `maxPortfolioPct = 34%`, the per-stock cap was ~$1.4–1.7m — below the gate. All stocks skipped silently every tick.
+
+**Why it worked before:** Pre-reset with hundreds of millions, per-stock caps were tens of millions, way above $2m.
+
+**Fix:** All buy minimums lowered from `$2m → $1m` across real trader, paper mode, and YOLO. $1m = 10× commission, keeping round-trip overhead at ~20%.
+
+---
+
+### Feature: Auto-revert to SAFE_CONFIG on bad runs
+New safety net in `recordTrade()`:
+- Tracks `consecutiveLosses` (resets on any win) and a 20-trade rolling window
+- Triggers **SAFE MODE** if: 3 consecutive losses OR rolling win rate < 45% over 10+ trades
+- Applies conservative locked params: 65%/35% forecast thresholds, 20% max per stock
+- Recovery check every 50 ticks: if last 10 trades hit ≥55% WR, reloads proven params and exits safe mode
+- Dashboard header shows `⚠ SAFE MODE` in yellow with trigger reason and ticks until next recovery check
+
+---
+
+### Fix: Paper trader initialized with `$0` virtual cash
+Paper portfolios were initialized with `ns.getServerMoneyAvailable("home")` — but by the time paper init ran, the real trader had already deployed most cash into positions. Paper portfolios started with near-zero virtual funds and could never buy anything.
+
+**Fix:** Initialize with `totalWorth(ns)` (full net worth including open positions) so paper strategies always have a proper virtual bankroll regardless of real deployment.
+
+---
+
 > **TL;DR:** Sharper signals (3-window flip detection, EWMA vol, magnitude momentum), smarter capital allocation (Kelly sizing replaces flat %-cap), fewer false exits (2-tick inversion confirmation), more aggressive profit-taking (early exit at +5% after 40 ticks), and a portfolio drawdown circuit-breaker. Paper trader now runs 300 ticks and uses the same forecast algorithm as the live trader.
 
 ---
